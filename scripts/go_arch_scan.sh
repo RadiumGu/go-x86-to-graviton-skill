@@ -259,6 +259,61 @@ if [ $HAVE_GO -eq 1 ]; then
       check "arm64 resolution produced errors that amd64 did not; read them:"
       sed 's/^/           /' "$TMP/e-arm64" | head -10
     fi
+
+    # The resolved package SET, compared between architectures.
+    #
+    # A raw count difference is normal and must not be read as a finding. Measured on
+    # RadiumGu/one-observability-demo payforadoption-go: amd64 resolves 576 packages and
+    # arm64 575, and the single difference is `vendor/golang.org/x/sys/cpu` - the
+    # standard library's OWN vendored copy, which the amd64 crypto packages pull in for
+    # CPU feature detection and the arm64 ones reach differently. Nothing is wrong.
+    #
+    # What is worth reporting is a NON-STANDARD package present on one architecture and
+    # not the other, because that is project or dependency code disappearing.
+    if command -v python3 >/dev/null 2>&1; then
+      for a in arm64 amd64; do
+        python3 - "$TMP/deps-$a.json" >"$TMP/set.$a" 2>/dev/null <<'PY'
+import json, sys
+dec = json.JSONDecoder()
+try:
+    buf = open(sys.argv[1]).read()
+except OSError:
+    raise SystemExit
+i, n = 0, len(buf)
+out = []
+while i < n:
+    while i < n and buf[i] in " \t\r\n":
+        i += 1
+    if i >= n:
+        break
+    try:
+        obj, i = dec.raw_decode(buf, i)
+    except ValueError:
+        break
+    if obj.get("Standard"):           # stdlib differs between ports by design
+        continue
+    out.append(obj["ImportPath"])
+for p in sorted(set(out)):
+    print(p)
+PY
+      done
+      if [ -s "$TMP/set.arm64" ] && [ -s "$TMP/set.amd64" ]; then
+        comm -13 "$TMP/set.arm64" "$TMP/set.amd64" >"$TMP/set.amd64only" 2>/dev/null
+        comm -23 "$TMP/set.arm64" "$TMP/set.amd64" >"$TMP/set.arm64only" 2>/dev/null
+        nao=$(wc -l <"$TMP/set.amd64only" | tr -d ' ')
+        nro=$(wc -l <"$TMP/set.arm64only" | tr -d ' ')
+        note "         non-stdlib packages: arm64=$(wc -l <"$TMP/set.arm64" | tr -d ' ')  amd64=$(wc -l <"$TMP/set.amd64" | tr -d ' ')  (a raw count difference in the STDLIB is normal)"
+        if [ "${nao:-0}" -gt 0 ]; then
+          check "$nao non-stdlib package(s) resolve on amd64 but NOT on arm64 - project or dependency code is disappearing:"
+          sed 's|^|           |' "$TMP/set.amd64only" | head -10
+        fi
+        if [ "${nro:-0}" -gt 0 ]; then
+          note "         $nro non-stdlib package(s) resolve on arm64 only (usually an arm64-specific implementation package, which is fine):"
+          sed 's|^|           |' "$TMP/set.arm64only" | head -5
+        fi
+        [ "${nao:-0}" -eq 0 ] && ok "the non-stdlib package set is identical on both architectures"
+      fi
+    fi
   fi
 else
   check "no Go toolchain: resolution and Shape C detection not verified"

@@ -178,6 +178,44 @@ diff graviton-validation/raw/constraint-sweep-amd64.err \
 
 The two-pass result is what makes a Shape C verdict defensible: pass 1 says *this blocks the build*, pass 2 says *this will block the build as soon as it is imported*, and the amd64 sweep proves the exclusion is about the architecture and not about a package that is broken everywhere.
 
+### Compare the resolved SET, not the count
+
+A raw package-count difference between the two architectures is **normal and is not a
+finding**. Measured on `payforadoption-go`: amd64 resolves **576** packages and arm64
+**575**, and the single difference is `vendor/golang.org/x/sys/cpu` - the standard
+library's own vendored copy, which the amd64 crypto packages pull in for CPU feature
+detection and the arm64 ones reach by another path. Nothing is wrong, and a report that
+flags the count as a discrepancy is noise.
+
+What is worth reporting is a **non-standard** package present on one architecture and
+absent on the other, because that is project or dependency code disappearing:
+
+```bash
+for a in arm64 amd64; do
+  python3 - "graviton-validation/raw/go-list-deps-$a.json" >"/tmp/set.$a" <<'PY'
+import json, sys
+dec = json.JSONDecoder(); buf = open(sys.argv[1]).read(); i, n = 0, len(buf); out = []
+while i < n:
+    while i < n and buf[i] in " \t\r\n": i += 1
+    if i >= n: break
+    try: obj, i = dec.raw_decode(buf, i)
+    except ValueError: break
+    if obj.get("Standard"): continue      # the stdlib differs between ports by design
+    out.append(obj["ImportPath"])
+for p in sorted(set(out)): print(p)
+PY
+done
+sort -o /tmp/set.arm64 /tmp/set.arm64; sort -o /tmp/set.amd64 /tmp/set.amd64
+echo "--- resolve on amd64 but NOT arm64 (a finding) ---"; comm -13 /tmp/set.arm64 /tmp/set.amd64
+echo "--- resolve on arm64 only (usually an arm64 implementation package, fine) ---"; comm -23 /tmp/set.arm64 /tmp/set.amd64
+```
+
+The same measurement confirms the `Standard` filter that Phase 1.2's cgo scan applies:
+`payforadoption-go` has **three** packages reporting `CgoFiles`, and all three are
+stdlib - `runtime/cgo` (`cgo.go`), `net` (five `cgo_*.go` files) and `os/user`
+(`cgo_lookup_cgo.go`, `getgrouplist_unix.go`). Without the filter, every pure-Go project
+scanned with `CGO_ENABLED=1` reports three cgo packages it does not have.
+
 Sanity check the capture. An empty or one-line JSON file is a failed resolution, not an all-clear:
 
 ```bash
