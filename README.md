@@ -212,6 +212,27 @@ It detects whether it is on arm64 hardware and reports every check it cannot mea
 
 ---
 
+## Tests and CI
+
+```bash
+bash tests/run_tests.sh      # 31 assertions, no Go toolchain required
+./scripts/sync_power.sh      # after editing SKILL.md
+```
+
+`tests/fixtures/broken/` carries one instance of every detectable defect plus two that
+must **not** be reported (a correct `xx-go` Dockerfile, and a `.s` file whose constraint
+sits at line 8). `tests/fixtures/clean/` must come back with zero findings.
+`tests/memory-model/` is the litmus test and the race fixture.
+
+[`.github/workflows/skill-ci.yml`](.github/workflows/skill-ci.yml) runs all of it on x86,
+arm64 and macOS, scans `klauspost/compress` end to end, and re-measures the memory-model
+result on both architectures.
+
+To gate your **own** Go project, copy
+[`examples/ci/graviton-gate.yml`](examples/ci/graviton-gate.yml) into
+`.github/workflows/`. Set `DEPLOY_CGO_ENABLED` and `DEPLOY_BUILD_TAGS` to match your
+deployment, and flip `SCAN_STRICT` to `1` once the repo is clean.
+
 ## Output
 
 The transformation writes into `graviton-validation/` in your project:
@@ -264,23 +285,78 @@ See [`summaries.md`](summaries.md) for the canonical index of every file and whe
 
 ## Verification status
 
-What has been exercised, and what has not:
+Everything below was executed, not inferred. Two dedicated EC2 instances in the same
+subnet and availability zone, identical except for architecture: `c7g.2xlarge`
+(Graviton3, arm64) and `c7i.2xlarge` (x86-64), both Amazon Linux 2023, Go 1.27.2,
+gcc 11.5.0, 8 vCPU, 15 GB.
 
-**Verified** against a deliberately broken Go fixture on `go1.27.2 linux/arm64`:
+### The measurement the skill rests on
 
-- both Shape C detection passes, including the measured finding that `go list ./...`, `go list -deps -json ./...`, `go build ./...` and `go vet ./...` **all** report zero errors for an unimported amd64-only package, while naming the directory explicitly reports it
-- that `go list` populates `CgoFiles` only with `CGO_ENABLED=1`; with cgo off the same files appear in `IgnoredGoFiles` and a cgo project looks pure Go
-- the stdlib filter (`runtime/cgo` otherwise appears in every cgo inventory)
-- `#cgo` x86-flag detection in both the `// #cgo` and block-comment forms
-- unconstrained `.s` detection, and the verbatim build error it produces (`unrecognized instruction "MOVQ"`)
-- the scanner's three exit statuses, against a broken fixture, a clean project and a non-Go directory
-- `arm64_validate.sh` end to end on arm64 hardware, including that it reports the race criterion `NOT RUN` rather than `PASS` when no C compiler is present
+A message-passing litmus test - writer stores `data` then `flag`, reader loads `flag`
+then `data`, no synchronization, the two variables on **separate cache lines**:
 
-**Not verified:** the race detector's positive branch (this host has no C compiler, so a real `WARNING: DATA RACE` was never produced), the cgo Route 2/3/4 resolution commands against live distro indexes and module caches, and the container and deployment-descriptor paths. Those are documented from the Go and AWS specifications and from the toolchain's own behavior, not from an executed run.
+| | arm64 (Graviton3) | x86-64 |
+|---|---|---|
+| samples | 80.8M / 75.5M / 87.8M | 407.8M / 404.3M / 403.6M |
+| reader saw flag ahead of data | **18,049,284 / 28,576,401 / 30,639,002** | **0 / 0 / 0** |
+| rate | **22.3% / 37.9% / 34.9%** | **0 in 1.2e9 samples** |
 
-No dependency version floors are asserted anywhere in the skill. A recalled floor is a wrong verdict waiting to happen, so the documents give the check to run instead.
+Source: [`tests/memory-model/main.go`](tests/memory-model/main.go). Two methodology
+errors were made and corrected on the way to this number, both documented in the file:
+adjacent `int64` globals share a cache line and are ordered for free (a first version
+measured **0 violations in 1.9e8 samples on arm64** purely because of that), and the
+accesses must go through `//go:noinline` helpers or Go's compiler may keep a global in a
+register across the loop.
 
----
+### The correction that measurement forced
+
+The **race detector is architecture-independent**. On a realistic bug (a lazily-warmed
+cache published through a plain `bool`, [`tests/memory-model/cache/`](tests/memory-model/cache/)),
+plain `go test` passed on **both** machines and `go test -race` reported **3 data races on
+both**. An earlier version of this skill said emulation and x86 "do not count" for the
+race criterion; that was wrong. Detection is instrumentation, not a hardware probe. What
+arm64 adds is different interleaving, and the 22-38% manifestation rate above.
+
+### Scanner, against four real repositories
+
+Run on containerd (vendored, 1122 packages, 2 cgo packages), minio (1319 packages,
+assembly-heavy, no vendor), confluent-kafka-go and go-sqlite3. Nine defects were found
+in the scanner and fixed; the commit log names the repository that exposed each one. The
+headline three:
+
+- a failed `go list` capture printed `OK no reachable Shape C package` from an empty
+  JSON file - an empty result read as an all-clear
+- the in-file build-constraint check used `head -5`; containerd's vendored
+  `goid_go1.4.s` carries its `// +build` at line 8 and `goid_go1.5.s` at line 18, both
+  behind a license header, so both correct files were reported as defects
+- a **false accusation** on containerd's `.github/workflows/release/Dockerfile`, which
+  uses `tonistiigi/xx`: `xx-go --wrap` derives `GOARCH` from `$TARGETPLATFORM`, so the
+  Dockerfile is correct and the skill's own case study had to be amended
+
+After the fixes, containerd went from 10 findings / 14 checks to **2 findings / 10
+checks**, and both remaining findings are real (4 x86-hardcoded download URLs, 3
+hardcoded `GOARCH: amd64` in CI workflows).
+
+### Regression tests
+
+[`tests/run_tests.sh`](tests/run_tests.sh), 31 assertions, all passing. Each one pins a
+specific output line, and each exists because that defect shipped. Run in CI on
+`ubuntu-24.04`, `ubuntu-24.04-arm` and `macos-14` (the bash 3.2 floor), with shellcheck.
+
+### Still not verified
+
+- the cgo Route 2 / 3 / 4 resolution commands against live distro indexes and module
+  caches. containerd's two cgo packages (`miekg/pkcs11` via `-ldl`,
+  `containerd/btrfs/v2`) were detected and classified, but their aarch64 libraries were
+  not sourced and built
+- container and deployment-descriptor validation (Phase 3.3), including the in-image
+  native-file scan
+- `go.work` workspaces
+- `arm64_validate.sh`'s race branch firing on a real `WARNING: DATA RACE` in a project's
+  own suite (it was exercised on the memory-model fixture, not through the script)
+
+No dependency version floors are asserted anywhere in the skill. A recalled floor is a
+wrong verdict waiting to happen, so the documents give the check to run instead.
 
 ## Contributing
 

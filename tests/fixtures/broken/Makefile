@@ -1,0 +1,6 @@
+GOARCH = amd64
+GOAMD64 = v3
+build:
+	GOARCH=$(GOARCH) go build ./...
+test:
+	go test ./...

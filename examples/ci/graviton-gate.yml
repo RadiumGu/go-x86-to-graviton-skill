@@ -1,0 +1,163 @@
+# Graviton CI gate - COPY THIS INTO YOUR OWN Go PROJECT
+#
+#   cp examples/ci/graviton-gate.yml .github/workflows/graviton-gate.yml
+#
+# What it enforces, and why each job is here rather than folded into one:
+#
+#   1. arm64-build   - the module builds for linux/arm64. Cheapest possible gate,
+#                      runs on the x86 runner by cross-compiling, seconds.
+#   2. arm64-native  - it builds, vets and tests ON arm64 with the CGO_ENABLED
+#                      your deployment uses. Cross-compiling executes nothing.
+#   3. race          - `go test -race` on BOTH architectures. The detector is
+#                      instrumentation, not a hardware probe, so x86 is not a
+#                      weaker detector - but a race that fires here is a 22-38%
+#                      event on Graviton and 0 in 1.2e9 samples on x86 (measured
+#                      on c7g.2xlarge vs c7i.2xlarge), so this is the job that
+#                      earns its minutes.
+#   4. arch-scan     - the skill's static scan, as a soft gate. It is advisory by
+#                      default: turn SCAN_STRICT to 1 once your repo is clean, and
+#                      it becomes a hard gate against regressions.
+#
+# Prerequisites: GitHub-hosted arm64 runners (`ubuntu-24.04-arm`) or your own
+# arm64 self-hosted runner. Replace the runner labels if self-hosting.
+
+name: graviton-gate
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  # Set these two to match your DEPLOYMENT, not your laptop.
+  DEPLOY_CGO_ENABLED: '0'
+  DEPLOY_BUILD_TAGS: ''        # e.g. 'netgo,osusergo'
+  SCAN_STRICT: '0'             # 1 = the static scan fails the build
+
+jobs:
+  arm64-build:
+    name: cross-build linux/arm64
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with: { go-version-file: go.mod, cache: true }
+      - name: GOOS=linux GOARCH=arm64 go build ./...
+        run: |
+          set -eux
+          TAGS=""; [ -n "$DEPLOY_BUILD_TAGS" ] && TAGS="-tags=$DEPLOY_BUILD_TAGS"
+          CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build $TAGS ./...
+      - name: no package excluded on arm64 but not on amd64
+        run: |
+          # `./...` silently skips a package nothing imports, so name every
+          # directory explicitly. Measured: go list, go build AND go vet all
+          # report zero errors for an unimported amd64-only package.
+          set -u
+          : > /tmp/a64.err; : > /tmp/x64.err
+          find . -name '*.go' -not -path './.git/*' | sed 's|/[^/]*$||' | sort -u \
+          | while read -r d; do
+              CGO_ENABLED=1 GOOS=linux GOARCH=arm64 go list "$d" >/dev/null 2>>/tmp/a64.err
+              CGO_ENABLED=1 GOOS=linux GOARCH=amd64 go list "$d" >/dev/null 2>>/tmp/x64.err
+            done
+          grep 'build constraints exclude all Go files' /tmp/a64.err 2>/dev/null \
+            | sed 's|.*in ||' | sort -u > /tmp/a64.dirs || true
+          grep 'build constraints exclude all Go files' /tmp/x64.err 2>/dev/null \
+            | sed 's|.*in ||' | sort -u > /tmp/x64.dirs || true
+          if ! comm -23 /tmp/a64.dirs /tmp/x64.dirs | grep -q .; then
+            echo "no arm64-only package exclusions"; exit 0
+          fi
+          echo "::error::packages build for amd64 but not arm64:"
+          comm -23 /tmp/a64.dirs /tmp/x64.dirs
+          exit 1
+
+  arm64-native:
+    name: native build + vet + test (${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { arch: amd64, runner: ubuntu-24.04 }      # the baseline
+          - { arch: arm64, runner: ubuntu-24.04-arm }  # the target
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with: { go-version-file: go.mod, cache: true }
+      - run: |
+          set -eux
+          TAGS=""; [ -n "$DEPLOY_BUILD_TAGS" ] && TAGS="-tags=$DEPLOY_BUILD_TAGS"
+          CGO_ENABLED="$DEPLOY_CGO_ENABLED" go build $TAGS ./...
+          CGO_ENABLED="$DEPLOY_CGO_ENABLED" go vet  $TAGS ./...
+          CGO_ENABLED="$DEPLOY_CGO_ENABLED" go test $TAGS ./...
+      - name: binary architecture
+        run: |
+          set -eux
+          TAGS=""; [ -n "$DEPLOY_BUILD_TAGS" ] && TAGS="-tags=$DEPLOY_BUILD_TAGS"
+          mkdir -p /tmp/bin
+          CGO_ENABLED="$DEPLOY_CGO_ENABLED" go build $TAGS -o /tmp/bin/ ./... || true
+          for b in /tmp/bin/*; do [ -f "$b" ] && file -b "$b"; done
+
+  race:
+    name: go test -race (${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { arch: amd64, runner: ubuntu-24.04 }
+          - { arch: arm64, runner: ubuntu-24.04-arm }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with: { go-version-file: go.mod, cache: true }
+      - name: go test -race ./...
+        run: |
+          set -eux
+          TAGS=""; [ -n "$DEPLOY_BUILD_TAGS" ] && TAGS="-tags=$DEPLOY_BUILD_TAGS"
+          # -race needs cgo and a C compiler, whatever the deployment sets.
+          # Building the TEST binary with cgo on does not change the shipped binary.
+          CGO_ENABLED=1 go test -race $TAGS ./... 2>&1 | tee /tmp/race.out
+      - name: fail on any data race
+        if: always()
+        run: |
+          if grep -q 'WARNING: DATA RACE' /tmp/race.out 2>/dev/null; then
+            echo "::error::data race on ${{ matrix.arch }} - see the full report in the log."
+            echo "::error::A race is a pre-existing defect. On Graviton it is a 22-38% event."
+            echo "::error::Fix it with a synchronization primitive. Never with a sleep, a"
+            echo "::error::statement reorder, runtime.Gosched or a GOGC/GOMAXPROCS change."
+            exit 1
+          fi
+
+  arch-scan:
+    name: graviton static scan
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with: { go-version-file: go.mod, cache: true }
+      - name: fetch the scanner
+        run: |
+          git clone --depth 1 -q \
+            https://github.com/RadiumGu/go-x86-to-graviton-skill.git /tmp/gvskill
+          chmod +x /tmp/gvskill/scripts/go_arch_scan.sh
+      - name: scan
+        run: |
+          set -u
+          # The scanner needs a resolvable module graph; without it every verdict
+          # is CHECK and the gate is meaningless.
+          go mod download
+          /tmp/gvskill/scripts/go_arch_scan.sh . | tee /tmp/scan.out
+          RC=${PIPESTATUS[0]}
+          grep -qE 'RESOLUTION FAILED' /tmp/scan.out && {
+            echo "::error::module resolution failed - the scan proved nothing"; exit 1; }
+          N=$(grep -c '^FINDING' /tmp/scan.out || true)
+          echo "findings: $N"
+          if [ "$SCAN_STRICT" = "1" ] && [ "${N:-0}" -gt 0 ]; then
+            echo "::error::$N finding(s) and SCAN_STRICT=1"; exit 1
+          fi
+          [ "${N:-0}" -gt 0 ] && echo "::warning::$N Graviton finding(s) - see the log"
+          exit 0

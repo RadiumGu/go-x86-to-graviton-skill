@@ -29,7 +29,25 @@ What actually breaks, in descending order of how often it blocks a migration:
 | 3 | **Non-Go artifacts** | committed `.so`/`.a`, tools downloaded with `_amd64` in the URL, base images with no arm64 manifest, `GOAMD64` in a Makefile | build or container-run time |
 | 4 | **Behavioral differences** | data races exposed by arm64's weakly-ordered memory model, FMA-fused float results, direct `syscall.SYS_*` numbers, hardcoded 4096 page size, cgo-dependent DNS and user lookup | **run time, in production, intermittently** |
 
-Class 4 is where Go migrations fail *after* they are declared successful. A pure-Go program that cross-compiles in two seconds can still deadlock on Graviton and never on x86, because x86-64 is Total Store Order and arm64 is weakly ordered: a program with a data race has no defined behavior on either, but only arm64 reliably shows you. **`go test -race` on arm64 is the highest-value single check in this entire skill** and has no equivalent in the Java or Python Graviton skills.
+Class 4 is where Go migrations fail *after* they are declared successful. A pure-Go program that cross-compiles in two seconds can still deadlock on Graviton and never on x86, because x86-64 is Total Store Order and arm64 is weakly ordered: a program with a data race has no defined behavior on either, but only arm64 reliably shows you.
+
+**Measured.** A message-passing litmus test — writer stores `data` then `flag`, reader loads `flag` then `data`, no synchronization, the two variables on separate cache lines — run on `c7g.2xlarge` and `c7i.2xlarge`, identical Go 1.27.2, 8 vCPU each:
+
+| | arm64 (Graviton3) | x86-64 |
+|---|---|---|
+| samples | 80.8M / 75.5M / 87.8M | 407.8M / 404.3M / 403.6M |
+| reader saw flag ahead of data | **18,049,284 / 28,576,401 / 30,639,002** | **0 / 0 / 0** |
+| rate | **22.3% / 37.9% / 34.9%** | **0 in 1.2e9 samples** |
+
+That is the whole thesis in one table: the same racy publication is a one-in-three event on Graviton and unobservable on x86.
+
+**And the correction that table forced.** The *race detector* is architecture-independent — it is happens-before instrumentation, not a hardware probe. On the same realistic bug (a lazily-warmed cache published through a plain `bool`), `go test` passed on **both** machines and `go test -race` reported **3 data races on both**. So:
+
+- `go test -race` is the check, and running it on x86 is **not** a weaker detector. Run it wherever you can run it, including under emulation.
+- What arm64 adds is different scheduling and interleaving, which can reach races x86 scheduling does not — and, far more importantly, it is where a race found anywhere becomes a 22–38% production event.
+- `go test` without `-race` passed on both. A green suite is not evidence.
+
+`go test -race ./...` is therefore the highest-value single check in this skill, and it has no equivalent in the Java or Python Graviton skills.
 
 > **Verify with the toolchain, never with grep alone.** `go list -deps -json ./...` reports cgo usage, build-constrained files and the resolved dependency set as facts. grep is the fallback for when the toolchain cannot resolve (private modules, no network, Bazel-only builds) and every grep-derived verdict is labelled CHECK until the toolchain or a build confirms it. See [document_references/cgo-and-native-dependencies.md](document_references/cgo-and-native-dependencies.md).
 
@@ -173,7 +191,7 @@ A criterion that runs on ARM64 passes only on a Graviton host or the target itse
 
 ### Test Criteria
 8. `go test ./...` executes on ARM64
-9. **`go test -race ./...` executes on ARM64 and reports no data race.** A race report is blocking: it is the class-4 finding this skill exists to catch
+9. **`go test -race ./...` reports no data race, run on arm64 AND on the x86 baseline.** A race report from *either* is blocking: the detector is architecture-independent (measured: the same bug reported 3 races on both a c7g and a c7i), so a race found on x86 is the same defect — it is only on Graviton that it becomes a 22–38% event. Emulation is acceptable for this criterion because the detector is instrumentation, not a hardware probe; what emulation cannot reproduce is the manifestation rate, which is a separate claim
 10. Failures classified: `INFRA` (non-blocking) / `ARM64` (blocking) / `PRE-EXISTING` (non-blocking)
 11. No ARM64-related test failures
 

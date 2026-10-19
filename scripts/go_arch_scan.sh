@@ -104,6 +104,18 @@ excluded_from_target() {
   ' "$1" 2>/dev/null | grep -q x
 }
 
+# has_basename DIR REGEX - true when DIR holds a file whose BASENAME matches REGEX.
+# Replaces `ls "$d" | grep -q ...`, which breaks on filenames with newlines or
+# leading dashes (shellcheck SC2010).
+has_basename() {
+  local d=$1 re=$2 f
+  for f in "$d"/*; do
+    [ -e "$f" ] || continue
+    printf '%s\n' "${f##*/}" | grep -qE "$re" && return 0
+  done
+  return 1
+}
+
 # portable_sibling DIR - true when the directory holds a path that builds on arm64
 # besides the amd64-suffixed ones: an arm64 file, an explicitly-named generic file, a
 # file gated `!amd64`, OR an unsuffixed file carrying NO constraint at all.
@@ -115,8 +127,8 @@ excluded_from_target() {
 # Shape C blocker on correct, widely-deployed code.
 portable_sibling() {
   local d=$1 f base
-  ls "$d" 2>/dev/null | grep -q 'arm64' && return 0
-  ls "$d" 2>/dev/null | grep -qE '_(generic|purego|noasm|portable|other|fallback|compat|ref)[^.]*\.(go|s)$' && return 0
+  has_basename "$d" 'arm64' && return 0
+  has_basename "$d" '_(generic|purego|noasm|portable|other|fallback|compat|ref)[^.]*\.(go|s)$' && return 0
   grep -lsE '^//[[:space:]]*(go:build|\+build)[^\n]*!amd64' "$d"/*.go >/dev/null 2>&1 && return 0
   for f in "$d"/*.go; do
     [ -f "$f" ] || continue
@@ -353,7 +365,7 @@ if [ "$na" -gt 0 ]; then
 
   while read -r d; do
     [ -n "$d" ] || continue
-    if ls "$d" 2>/dev/null | grep -q 'arm64'; then
+    if has_basename "$d" 'arm64'; then
       printf 'OK       Shape A (ported): %s\n' "$d"
     elif portable_sibling "$d"; then
       printf 'CHECK    Shape B (builds, read the fallback body): %s\n' "$d"
@@ -372,7 +384,7 @@ if [ "${nt:-0}" -gt 0 ]; then
   ntd=0
   while read -r d; do
     [ -n "$d" ] || continue
-    ls "$d" 2>/dev/null | grep -qE '_arm64.*_test\.go$' && continue
+    has_basename "$d" '_arm64.*_test\.go$' && continue
     ntd=$((ntd+1)); printf '           %s\n' "$d"
   done <"$TMP/amd64testdirs.txt" >"$TMP/testgap.txt"
   if [ -s "$TMP/testgap.txt" ]; then
@@ -386,7 +398,7 @@ find . -type d -name .git -prune -o -type f \( -name '*_arm.go' -o -name '*_arm.
   | while read -r f; do
       irrelevant_path "$f" && continue
       d=$(dirname "$f")
-      ls "$d" 2>/dev/null | grep -q 'arm64' || printf 'CHECK    32-bit arm only (GOARCH=arm != arm64): %s\n' "$f"
+      has_basename "$d" 'arm64' || printf 'CHECK    32-bit arm only (GOARCH=arm != arm64): %s\n' "$f"
     done
 
 # Unconstrained .s files: compiled for EVERY architecture.
@@ -442,7 +454,9 @@ fi
 
 # Test files gated on amd64 leave the portable path untested
 find . -type d -name .git -prune -o -name '*_test.go' -print 2>/dev/null \
-  | xargs grep -lsE '^//[[:space:]]*(go:build|\+build)[^\n]*amd64' 2>/dev/null \
+  | while read -r tf; do
+      grep -lsE '^//[[:space:]]*(go:build|\+build)[^\n]*amd64' "$tf" 2>/dev/null
+    done \
   | sed 's/^/CHECK    test file gated on amd64 (portable path untested): /'
 
 # -------------------------------------------------------- 4. native artifacts

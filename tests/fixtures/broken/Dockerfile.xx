@@ -1,0 +1,6 @@
+# Correct: a cross-compile wrapper sets GOARCH, so --platform here is idiomatic.
+FROM --platform=$BUILDPLATFORM tonistiigi/xx:1.6.1 AS xx
+FROM --platform=$BUILDPLATFORM golang:1.24 AS build
+COPY --from=xx / /
+ARG TARGETPLATFORM
+RUN xx-go --wrap && go build -o /app ./cmd/app && xx-verify /app

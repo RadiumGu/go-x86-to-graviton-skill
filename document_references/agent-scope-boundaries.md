@@ -343,6 +343,19 @@ A Dockerfile gained `--platform=$BUILDPLATFORM` on its builder stage, as every g
 
 `GOARCH=${TARGETARCH}` is the line that makes the binary arm64. `--platform` alone never does. And the check that catches it is not `image inspect` — it is `file` on the binary extracted from the image (Phase 3.3).
 
+**The false-accusation half of this case study, measured.** An earlier version of this
+skill reported any Dockerfile carrying `--platform` with no literal `GOARCH=$TARGETARCH`
+as defective. Run against containerd's `.github/workflows/release/Dockerfile`, that
+produced a false accusation on idiomatic code: the file uses
+[tonistiigi/xx](https://github.com/tonistiigi/xx), where `xx-go --wrap` derives `GOARCH`
+from `$TARGETPLATFORM` and `xx-verify` then checks the output binary's architecture. There
+is no literal `GOARCH=$TARGETARCH` anywhere and the Dockerfile is correct.
+
+So the rule is: a `--platform` build needs *something* that sets `GOARCH` for the target,
+and a cross-compile wrapper counts. Recognize `xx-go`, `xx-info`, `xx-verify`, `--wrap`,
+GoReleaser and `ko` before claiming the defect - then confirm the binary's architecture in
+Phase 3.3 regardless, because that check is cheap and settles it either way.
+
 ### Case study: the dependency upgrade that was not a fix
 
 An agent reported: *"Updated 23 dependencies to their latest versions for ARM64 compatibility. All tests pass."* The `go.mod` diff was 23 lines; the arm64 build had been passing before any of them.

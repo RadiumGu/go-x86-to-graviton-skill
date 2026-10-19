@@ -21,7 +21,8 @@ The rule that governs this phase: **name the environment every result came from.
 | Environment | Build (pure Go) | Build (cgo) | `go vet` | `go test` | **`go test -race`** | Startup |
 |---|---|---|---|---|---|---|
 | x86 host, `GOARCH=arm64` cross-compile | **yes** | only with a cross-compiler | yes | no (cannot execute) | no | no |
-| x86 host, arm64 container under QEMU | yes | yes (native in-container toolchain) | yes | yes, slowly | **no — see below** | partial |
+| x86 host, native amd64 (the baseline) | n/a | n/a | yes | **yes** | **yes** (same detector) | n/a |
+| x86 host, arm64 container under QEMU | yes | yes (native in-container toolchain) | yes | yes, slowly | **yes** (detection is instrumentation) | partial |
 | Apple Silicon (arm64) | yes | yes | yes | **yes** | **yes** | yes (macOS, not Linux) |
 | Graviton EC2 running the target OS | yes | yes | yes | **yes** | **yes** | **yes** |
 | GitHub `ubuntu-24.04-arm` runner | yes | yes | yes | **yes** | **yes** | yes (Ubuntu) |
@@ -31,7 +32,14 @@ Two limits to state in the report rather than work around:
 
 **Cross-compilation executes nothing.** `GOOS=linux GOARCH=arm64 go build ./...` succeeding is a real and important result — for a pure-Go project it retires most of the build risk in one command — but it satisfies exit criterion 1 and no other. Do not let it stand in for criteria 2, 5, 8-13.
 
-**Emulation is not the race check.** An arm64 container on an x86 host runs arm64 instructions through QEMU's translation, which does not faithfully reproduce arm64's memory ordering: QEMU's user-mode emulation serializes in ways real hardware does not, so a race that real Graviton exposes can stay invisible under emulation. Emulation is fine for build, link, import, container and startup checks. **Exit criterion 9 requires real arm64 hardware.** If none is available, criterion 9 is `NOT RUN` and the migration carries that as an open risk — write it that way rather than reporting a pass.
+**Emulation IS acceptable for the race detector - this corrects an earlier version of this skill.** The detector is happens-before instrumentation, not a hardware probe. Measured on the same realistic bug (a lazily-warmed cache published through a plain `bool`): plain `go test` passed on both a `c7g.2xlarge` and a `c7i.2xlarge`, and `go test -race` reported **3 data races on both**. So run `-race` wherever you can run it - arm64, x86, or an emulated container - and treat a report from any of them as the same blocking defect.
+
+What real arm64 hardware adds is two things, and only the second is about the hardware:
+
+1. **Different scheduling and interleaving**, which can reach races x86 scheduling does not. That is a reason to run it on arm64 *as well*, not instead.
+2. **The manifestation rate**, which is why a race matters more here. A message-passing litmus test with the two variables on separate cache lines observed the reader seeing the flag ahead of the data in **22.3% / 37.9% / 34.9%** of samples on `c7g.2xlarge` (80.8M / 75.5M / 87.8M samples) and **0 times in 1.2e9 samples** on `c7i.2xlarge`, identical Go 1.27.2 and 8 vCPU each. Emulation cannot reproduce that number, so a manifestation-rate claim needs real hardware; the detection does not.
+
+If no arm64 host is available, criterion 9 still runs on x86 and still blocks on a report. What becomes `NOT RUN` is the arm64 *interleaving* coverage, not the race check itself - write it that way.
 
 ### Detect a working container runtime
 

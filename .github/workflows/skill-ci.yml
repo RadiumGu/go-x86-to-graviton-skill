@@ -1,0 +1,121 @@
+name: skill-ci
+
+# CI for the SKILL repository itself. This is deliberately NOT "run
+# go_arch_scan.sh on this repo" - there is no Go code here to scan, so that
+# would be a no-op that looks like a gate. What it actually guards:
+#
+#   - the helper scripts parse, lint clean, and still produce the exact findings
+#     they are supposed to on a fixture with known defects (tests/run_tests.sh)
+#   - SKILL.md and POWER.md bodies have not drifted
+#   - every relative markdown link resolves
+#   - the memory-model measurement the skill's central claim rests on still
+#     reproduces, on a real arm64 runner and a real x86 runner
+#
+# The template users copy into their OWN Go project is examples/ci/graviton-gate.yml.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  lint-and-regress:
+    name: scripts + docs (${{ matrix.runner }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-24.04, ubuntu-24.04-arm, macos-14]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: shellcheck
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq shellcheck
+          # Each exclusion is deliberate:
+          #   SC2086 - word splitting is wanted where a grep pattern must expand
+          #   SC2016 - flags the literal $TARGETARCH inside documentation strings
+          #   SC2012 - `ls` in a message, not for parsing
+          #   SC2044 - `for f in $(find ...)` over paths this repo controls
+          #   SC1090 - no dynamic sourcing to follow
+          #   SC2317 - trap-invoked cleanup() looks unreachable to the linter
+          shellcheck -e SC2086,SC2016,SC2012,SC2044,SC1090,SC2317 \
+            scripts/*.sh tests/run_tests.sh
+
+      - name: regression tests
+        run: |
+          # macOS defaults to zsh and ships bash 3.2 - run explicitly under bash,
+          # which is also the compatibility floor the skill documents.
+          bash --version | head -1
+          bash tests/run_tests.sh
+
+      - name: scan a real third-party repo end to end
+        run: |
+          set -eux
+          git clone --depth 1 -q https://github.com/klauspost/compress.git /tmp/compress
+          # assembly-heavy, Shape A and Shape B throughout, no cgo: a repo where the
+          # correct answer is "no blockers", so a regression that invents findings fails here.
+          cd /tmp/compress
+          bash "$GITHUB_WORKSPACE/scripts/go_arch_scan.sh" . | tee /tmp/scan.out
+          grep -q 'OK  *resolved [0-9]* packages' /tmp/scan.out
+          grep -q 'OK  *no package in the resolved set uses cgo' /tmp/scan.out
+          # Shape C is a build blocker; this repo has none, and claiming one is a regression.
+          ! grep -q 'FINDING  Shape C' /tmp/scan.out
+
+  memory-model:
+    name: memory-model measurement (${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { arch: amd64, runner: ubuntu-24.04,     expect: zero }
+          - { arch: arm64, runner: ubuntu-24.04-arm, expect: nonzero }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with: { go-version: 'stable' }
+
+      - name: litmus - store/load reordering
+        working-directory: tests/memory-model
+        run: |
+          set -eux
+          go build -o /tmp/litmus .
+          /tmp/litmus -iters 120000000 | tee /tmp/litmus.out
+          V=$(sed -n 's/.*flag-ahead-of-data=\([0-9]*\).*/\1/p' /tmp/litmus.out)
+          echo "violations=$V on ${{ matrix.arch }}"
+          if [ "${{ matrix.expect }}" = "zero" ]; then
+            # x86-64 is Total Store Order: this must be 0. A nonzero value here means
+            # either the test is wrong or the claim is, and both need a human.
+            [ "$V" -eq 0 ]
+          else
+            # arm64 is weakly ordered. A hosted runner is noisier and may be
+            # less contended than a dedicated c7g, so this asserts only that the
+            # phenomenon is observable at all, not the 22-38% rate measured on
+            # c7g.2xlarge. A zero here is worth investigating, not ignoring.
+            if [ "$V" -eq 0 ]; then
+              echo "::warning::no reordering observed on arm64 in this run."
+              echo "::warning::check cache-line separation in tests/memory-model/main.go first."
+            fi
+          fi
+
+      - name: race detector fires on both architectures
+        working-directory: tests/memory-model
+        run: |
+          set -eu
+          # The realistic bug: a lazily-warmed cache published through a plain bool.
+          # Plain `go test` passes on BOTH architectures - that is the point.
+          go test ./cache/ -count=1
+          # With -race it must report, on BOTH architectures. The detector is
+          # instrumentation, not a hardware probe.
+          if go test -race ./cache/ -count=1 >/tmp/race.out 2>&1; then
+            echo "::error::go test -race did not report the known race in tests/memory-model/cache"
+            cat /tmp/race.out; exit 1
+          fi
+          grep -q 'WARNING: DATA RACE' /tmp/race.out
+          echo "DATA RACE reports on ${{ matrix.arch }}: $(grep -c 'WARNING: DATA RACE' /tmp/race.out)"

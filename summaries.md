@@ -36,4 +36,16 @@ This file is the canonical inventory of the skill. Every file in the skill folde
 
 * "scripts/sync_power.sh": "Regenerates POWER.md from SKILL.md, preserving the Kiro frontmatter and replacing the body. Run it after editing SKILL.md so the two entry points cannot drift."
 
+* "tests/run_tests.sh": "Regression tests for the helper scripts. Every assertion exists because the corresponding defect was shipped and then found on a real repository: the block-comment #cgo form, a build constraint at line 8 behind a license header, a GOOS-suffixed .s file, the xx-go cross-compile wrapper that must NOT be accused, and a failed go list capture that must not print an all-clear. Asserts specific output lines rather than exit status, so a heuristic that silently stops firing is caught. Also checks SKILL.md/POWER.md body identity and every relative markdown link. 31 assertions; run with `bash tests/run_tests.sh`."
+
+* "tests/fixtures/broken/": "A Go module carrying one instance of each detectable defect, plus two that must NOT be reported: a correct xx-go Dockerfile and a .s file whose constraint sits at line 8. The scanner's expected output on this tree is pinned by run_tests.sh."
+
+* "tests/fixtures/clean/": "A Go module with no findings. Guards against a regression that invents them; the scanner must exit 0 with zero FINDING lines."
+
+* "tests/memory-model/": "The measurement the skill's central claim rests on. main.go is a message-passing litmus test (writer stores data then flag, reader loads flag then data, no synchronization, variables on separate cache lines) that measured 22.3% / 37.9% / 34.9% reordering on c7g.2xlarge and 0 in 1.2e9 samples on c7i.2xlarge. cache/ is a realistic bug - a lazily-warmed cache published through a plain bool - where plain `go test` passes on BOTH architectures and `go test -race` reports 3 data races on BOTH, which is how the detector was established to be architecture-independent."
+
+* ".github/workflows/skill-ci.yml": "CI for this repository. Deliberately NOT 'scan this repo' - there is no Go code here. It lints the scripts, runs the regression tests on x86, arm64 and macOS (bash 3.2 floor), scans klauspost/compress end to end as a repo whose correct answer is 'no blockers', and re-measures the memory-model litmus and the race detector on both architectures."
+
+* "examples/ci/graviton-gate.yml": "The template users copy into their OWN Go project: cross-build gate, the per-directory Shape C sweep, native build/vet/test on arm64 with an x86 baseline, `go test -race` on both architectures as a hard gate, and the static scan as a soft gate that becomes hard once SCAN_STRICT=1."
+
 * "README.md": "Human-facing overview: what the skill does and how it differs from the Java/Python Graviton skills, per-platform install commands, the optional skill-config.md, the helper scripts, the graviton-validation/ output listing, and what the skill deliberately does not do. Not read during a run; it points humans at this index for the file map."

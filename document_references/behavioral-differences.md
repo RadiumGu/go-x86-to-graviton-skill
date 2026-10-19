@@ -34,6 +34,33 @@ So the accurate statement is not "arm64 breaks racy code". It is:
 
 > **arm64 reveals races that x86 hides.** The defect was always there. The migration is when you find out.
 
+> **Measured on real hardware (c7g.2xlarge vs c7i.2xlarge, go1.27.2, 8 vCPU each).**
+> A message-passing litmus test - writer stores `data` then `flag`, reader loads `flag`
+> then `data`, no synchronization, the two variables on **separate cache lines** - observed
+> the reader seeing the flag ahead of the data in **22.3% / 37.9% / 34.9%** of samples on
+> arm64 (80.8M / 75.5M / 87.8M samples) and **0 times in 1.2e9 samples** on x86-64.
+>
+> Two methodology notes, both learned by getting it wrong first:
+> - a first version declared `var data, flg int64` as adjacent globals, which placed them
+>   8 bytes apart on **one cache line**. Cache coherence then orders the two stores for
+>   free, and the test measured **0 violations in 1.9e8 samples on arm64** - a false null.
+>   The variables must sit on different cache lines.
+> - the accesses must go through `//go:noinline` helpers. Go's compiler may assume the
+>   program is race-free and keep a global in a register across the loop, leaving nothing
+>   to reorder.
+
+> **The race detector is architecture-independent - measured.** On a realistic bug (a
+> lazily-warmed cache published through a plain `bool`), plain `go test` passed on **both**
+> a c7g.2xlarge and a c7i.2xlarge, and `go test -race` reported **3 data races on both**.
+> The detector is happens-before instrumentation, not a hardware probe.
+>
+> So running `-race` on x86, or under emulation, is **not** a weaker detector, and an
+> earlier version of this skill was wrong to say otherwise. What arm64 adds is different
+> scheduling and interleaving, which can reach races x86 scheduling does not - and, far
+> more importantly, it is where a race found anywhere becomes a 22-38% production event.
+> Run `-race` wherever you can run it; treat a report from any architecture as the same
+> blocking defect.
+
 This framing matters operationally. A team that believes Graviton broke their service rolls back. A team that understands Graviton exposed a two-year-old race fixes the race.
 
 ### How to find it
@@ -58,7 +85,7 @@ Requirements and limits:
 - `-race` needs cgo and therefore a C compiler. On `linux/arm64` the race detector has been supported since Go 1.14
 - `CGO_ENABLED=0` means `-race` will not build. If the deployment sets `CGO_ENABLED=0`, build the **test** binary with cgo on for this check specifically and note it
 - **the race detector only reports races it observes.** A clean run is evidence, not proof. Say "no race observed in N runs of the suite", not "race-free"
-- **emulation is not evidence.** QEMU's user-mode emulation does not faithfully reproduce arm64's memory ordering. A clean `-race` run inside an emulated arm64 container on an x86 host does not satisfy exit criterion 9
+- **emulation is acceptable for the detector, not for the manifestation claim.** The race detector is happens-before instrumentation and works identically under emulation and on x86 (measured below). What emulation cannot reproduce is how often the bug fires on real Graviton hardware
 
 ### Raising the prior
 
@@ -416,7 +443,9 @@ Stating these explicitly prevents phantom findings:
 | False verdict | Why it is wrong | The real check |
 |---|---|---|
 | "No races found, the code is race-free" | the detector reports only what it observes | "no race observed in N runs of the suite" |
-| "`-race` passed in the arm64 container" (on an x86 host) | QEMU does not reproduce arm64 memory ordering | real arm64 hardware, or `NOT RUN` |
+| "the race must be run on arm64 or it does not count" | **measured wrong**: the detector reported the same 3 races on a c7g and a c7i. It is instrumentation, not a hardware probe | run `-race` wherever you can; a report from any architecture is the same blocking defect |
+| "`-race` passed, so there is no race" | the detector reports only what it observes, on any architecture | "no race observed in N runs"; raise N and target the concurrent packages |
+| "x86 showed no reordering, so the code is fine there" | **measured**: 0 in 1.2e9 samples on x86 vs 22-38% on arm64 - the defect is identical, the manifestation is not | the x86 result is the baseline that proves the finding is a manifestation difference, not a new bug |
 | "arm64 introduced a data race" | the race predates the migration | `-race` on the x86 baseline at the same commit, reported alongside |
 | "Float results changed, so arm64 is less accurate" | the FMA-fused result rounds once instead of twice and is usually more accurate | state the mechanism, not a quality judgement |
 | "All float code is at risk" | integer, `math/big` and decimal arithmetic are exact on both | identify fusible `x*y+z` shapes specifically |

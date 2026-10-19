@@ -1,0 +1,4 @@
+builds:
+  - id: app
+    goos: [linux]
+    goarch: [amd64]
