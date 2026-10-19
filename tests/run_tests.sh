@@ -143,6 +143,26 @@ assert_lacks "no Shape C all-clear from a failed capture" "$OUT4" 'OK +no reacha
 assert_lacks "no sweep all-clear from a failed capture"   "$OUT4" 'OK +per-directory sweep'
 assert_lacks "no pure-Go all-clear from a failed capture" "$OUT4" 'OK +no package in the resolved set uses cgo'
 
+echo
+echo "=== 7. arm64_validate: the race check runs on EVERY host ==="
+# Measured on a c7i.2xlarge: an earlier version reported criterion 9 as NOT RUN on
+# x86 and printed "emulation does not satisfy the race criterion", both contradicted
+# by the measurement that the detector is architecture-independent.
+VAL="$ROOT/scripts/arm64_validate.sh"
+if command -v go >/dev/null 2>&1 && command -v cc >/dev/null 2>&1; then
+  OUT5=$(mktemp); cd tests/memory-model || exit 2
+  bash "$VAL" . --cgo 1 --count 1 >"$OUT5" 2>&1 || true
+  cd "$ROOT" || exit 2
+  rm -rf tests/memory-model/graviton-validation
+  assert_has   "race check executed, not skipped" "$OUT5" '(FAIL|PASS) +9 +go test -race'
+  assert_has   "known race in the fixture reported" "$OUT5" 'DATA RACE report'
+  assert_lacks "no stale 'emulation does not count' claim" "$OUT5" 'emulation does NOT satisfy|QEMU does not reproduce'
+  assert_lacks "no cross-compiled baseline passed off as a baseline" "$OUT5" "x86 baseline: 0 race report"
+  rm -f "$OUT5"
+else
+  echo "  SKIP  no go and/or C compiler on this host - arm64_validate not exercised"
+fi
+
 rm -f "$OUT" "$OUT2" "$OUT3" "$OUT4"
 echo
 echo "================================"

@@ -63,6 +63,13 @@ esac
 
 TAGFLAG=""
 [ -n "$TAGS" ] && TAGFLAG="-tags=$TAGS"
+# The race log and label carry the architecture they were produced on, because the
+# detector runs on every host and the report must say which one it came from.
+if [ $NATIVE_ARM64 -eq 1 ]; then
+  RACE_ARCH_LABEL=arm64; RACE_LOG="$RAW/arm64-race.log"
+else
+  RACE_ARCH_LABEL="$HOSTARCH"; RACE_LOG="$RAW/amd64-race.log"
+fi
 SKIPFLAG=""
 [ -n "$SKIP" ] && SKIPFLAG="-skip=$SKIP"
 
@@ -78,10 +85,13 @@ echo "logs:      $RAW/"
 if [ $NATIVE_ARM64 -eq 1 ]; then
   echo "capability: native arm64 - build, vet, test and race are all measurable here"
 else
-  echo "capability: NOT arm64 - only the cross-build is measurable. Criteria 2, 5, 8-13"
-  echo "            will be reported NOT RUN. Re-run this on Graviton, Apple Silicon or"
-  echo "            an arm64 CI runner to satisfy them. Emulation does NOT satisfy the"
-  echo "            race criterion: QEMU does not reproduce arm64 memory ordering."
+  echo "capability: NOT arm64 - the cross-build and the RACE DETECTOR are measurable here."
+  echo "            Criteria 2, 5, 8 and 13 will be reported NOT RUN; re-run on Graviton,"
+  echo "            Apple Silicon or an arm64 CI runner to satisfy them."
+  echo "            The race check DOES run here and counts: the detector is"
+  echo "            happens-before instrumentation, not a hardware probe (measured - the"
+  echo "            same bug reported 3 races on both a c7g and a c7i). What arm64 adds is"
+  echo "            interleaving diversity and the 22-38% manifestation rate."
 fi
 if [ -z "$CGO" ]; then
   CGO="$(go env CGO_ENABLED)"
@@ -178,61 +188,52 @@ else
 fi
 
 # ------------------------------------------ 9. go test -race (criterion 9)
-# The reason this skill exists. The DETECTOR is architecture-independent (measured:
-# the same bug reported 3 races on both a c7g and a c7i), so this is worth running
-# wherever it runs. What arm64 adds is interleaving diversity, and the fact that a
-# race here is a 22-38% production event instead of 0 in 1.2e9 samples.
-if [ $NATIVE_ARM64 -eq 0 ]; then
-  notrun "9  go test -race on arm64" "host is $HOSTARCH - run it here anyway for detection"
-elif ! command -v cc >/dev/null 2>&1 && ! command -v gcc >/dev/null 2>&1; then
-  notrun "9  go test -race on arm64" "no C compiler: the race detector cannot build"
+# The reason this skill exists. The DETECTOR is architecture-independent - measured:
+# the same realistic bug reported 3 data races on both a c7g.2xlarge and a c7i.2xlarge,
+# while plain `go test` passed on both. So this runs on ANY host, and the host arch is
+# recorded with the result rather than used to skip it. What arm64 adds is interleaving
+# diversity and the manifestation rate (22-38% vs 0 in 1.2e9 samples), not detection.
+if [ "$RACE_ARCH_LABEL" = "arm64" ]; then
+  RACE_LABEL="9  go test -race on arm64 (target)"
+else
+  RACE_LABEL="9  go test -race on $HOSTARCH (baseline - same detector)"
+fi
+if ! command -v cc >/dev/null 2>&1 && ! command -v gcc >/dev/null 2>&1; then
+  notrun "$RACE_LABEL" "no C compiler: the race detector cannot build"
 else
   # shellcheck disable=SC2086
   CGO_ENABLED=1 go test -race -count="$COUNT" $TAGFLAG $SKIPFLAG ./... \
-    >"$RAW/arm64-race.log" 2>&1
+    >"$RACE_LOG" 2>&1
   RACE_RC=$?
-  NRACE=$(grep -c 'WARNING: DATA RACE' "$RAW/arm64-race.log" 2>/dev/null)
+  NRACE=$(grep -c 'WARNING: DATA RACE' "$RACE_LOG" 2>/dev/null)
   NRACE=${NRACE:-0}; [ "$NRACE" -eq "$NRACE" ] 2>/dev/null || NRACE=0
   if [ "$NRACE" -gt 0 ]; then
-    fail "9  go test -race on arm64" "$NRACE DATA RACE report(s) - see $RAW/arm64-race.log"
+    fail "$RACE_LABEL" "$NRACE DATA RACE report(s) - see $RACE_LOG"
     echo
-    echo "   A data race is BLOCKING. It is a pre-existing defect, and on Graviton it is a"
-    echo "   22-38% event where on x86 it was 0 in 1.2e9 samples (measured, see the skill's"
-    echo "   README). Copy the FULL detector output into the report - both stacks are the fix."
-    echo "   Never work around it with a sleep, a reorder or a runtime setting."
+    echo "   A data race is BLOCKING on every architecture. It is a pre-existing defect,"
+    echo "   and on Graviton it is a 22-38% event where on x86 it was 0 in 1.2e9 samples"
+    echo "   (measured; see the skill README). Copy the FULL detector output into the"
+    echo "   report - both stacks are the fix. Never work around it with a sleep, a"
+    echo "   statement reorder, runtime.Gosched or a GOGC/GOMAXPROCS change."
     echo
-    # The x86 baseline decides how the finding is framed - but it can only be obtained
-    # by EXECUTING on x86. `GOARCH=amd64 go test` on an arm64 host cross-compiles and
-    # cannot run the test binary, so it reports 0 races because nothing executed.
-    # Reading that 0 as "arm64 only" is exactly the empty-result-as-fact error this
-    # skill exists to prevent, and an earlier version of this script made it.
-    if [ "$HOSTARCH" = "x86_64" ] || [ "$HOSTARCH" = "amd64" ]; then
-      CGO_ENABLED=1 go test -race -count="$COUNT" $TAGFLAG $SKIPFLAG ./... \
-        >"$RAW/amd64-race.log" 2>&1
-      NB=$(grep -c 'WARNING: DATA RACE' "$RAW/amd64-race.log" 2>/dev/null); NB=${NB:-0}
-      echo "   x86 baseline (native, this host): $NB race report(s) in $RAW/amd64-race.log"
-      if [ "$NB" -gt 0 ]; then
-        echo "   -> reachable on both: the project has simply never run -race"
-      else
-        echo "   -> not observed on x86 in $COUNT run(s). Raise --count before concluding"
-        echo "      'arm64 only': the detector is architecture-independent, so a race it"
-        echo "      finds on arm64 is usually findable on x86 too, just less often."
-      fi
+    if [ $NATIVE_ARM64 -eq 1 ]; then
+      echo "   To frame the finding, run this same command on an x86 host and compare."
+      echo "   \`GOARCH=amd64 go test -race\` HERE only cross-compiles: it would report 0"
+      echo "   because nothing ran, and calling that 'arm64 only' would be wrong."
     else
-      notrun "   x86 baseline race comparison" "this host is $HOSTARCH"
-      echo "   The comparison needs a run that EXECUTES on x86: a real x86 host, an x86 CI"
-      echo "   runner, or \`docker run --platform linux/amd64\`. Setting GOARCH=amd64 here"
-      echo "   only cross-compiles - it would report 0 races because nothing ran, and"
-      echo "   reporting that as 'arm64 only' would be wrong."
-      echo "   Until then the finding is: a data race, blocking, architecture of origin"
-      echo "   UNDETERMINED."
+      echo "   This ran on x86. Run it on arm64 as well: different interleaving can reach"
+      echo "   races this scheduling does not, and arm64 is where the consequence lands."
     fi
   elif [ $RACE_RC -ne 0 ]; then
-    fail "9  go test -race on arm64" "no race, but tests failed - see $RAW/arm64-race.log"
+    fail "$RACE_LABEL" "no race, but tests failed - see $RACE_LOG"
   else
-    pass "9  go test -race on arm64" "no race observed in $COUNT run(s) of the suite"
-    echo "   (evidence, not proof: the detector reports only the races it observes)"
+    pass "$RACE_LABEL" "no race observed in $COUNT run(s) of the suite"
+    echo "   (evidence, not proof: the detector reports only the races it observes."
+    echo "    Raise --count, and run it on the other architecture too.)"
   fi
+fi
+if [ $NATIVE_ARM64 -eq 0 ]; then
+  notrun "9b arm64 interleaving coverage" "host is $HOSTARCH - the detection above still counts"
 fi
 
 # ------------------------------------------------ 12/13. binary and startup
