@@ -79,6 +79,56 @@ has_build_constraint() {
   ' "$1" 2>/dev/null
 }
 
+# excluded_from_target FILE - true when the file's own build constraint excludes
+# linux/arm64, so it is never compiled for this target and nothing in it is a finding.
+#
+# This is what separates a real stub from a harmless one. Measured on containerd's
+# vendor tree: wazero's isa_other.go is gated `//go:build !(amd64 || arm64)` and panics
+# with "unsupported architecture" - correct code, excluded on arm64, and reporting it is
+# noise. grpc's raw_conn_nonlinux.go is gated `//go:build !linux` and panics likewise.
+excluded_from_target() {
+  awk '
+    /^[[:space:]]*\/\/[[:space:]]*(go:build|\+build)/ {
+      line=$0
+      # !arm64 / !(... arm64 ...) / !linux / !(... linux ...) all exclude this target
+      if (line ~ /![[:space:]]*arm64/)  { print "x"; exit }
+      if (line ~ /![[:space:]]*linux/)  { print "x"; exit }
+      if (line ~ /!\([^)]*arm64[^)]*\)/) { print "x"; exit }
+      if (line ~ /!\([^)]*linux[^)]*\)/) { print "x"; exit }
+      exit
+    }
+    /^[[:space:]]*$/      { next }
+    /^[[:space:]]*\/\//   { next }
+    { exit }
+    NR > 200              { exit }
+  ' "$1" 2>/dev/null | grep -q x
+}
+
+# portable_sibling DIR - true when the directory holds a path that builds on arm64
+# besides the amd64-suffixed ones: an arm64 file, an explicitly-named generic file, a
+# file gated `!amd64`, OR an unsuffixed file carrying NO constraint at all.
+#
+# The last case is the one that matters in practice and the one a naive check misses.
+# Measured: klauspost/compress/internal/cpuinfo ships cpuinfo_amd64.go (gated
+# `amd64 && !appengine && !noasm && gc`) beside a plain cpuinfo.go with no constraint
+# line. That is textbook Shape B, and without this clause it is reported as a possible
+# Shape C blocker on correct, widely-deployed code.
+portable_sibling() {
+  local d=$1 f base
+  ls "$d" 2>/dev/null | grep -q 'arm64' && return 0
+  ls "$d" 2>/dev/null | grep -qE '_(generic|purego|noasm|portable|other|fallback|compat|ref)[^.]*\.(go|s)$' && return 0
+  grep -lsE '^//[[:space:]]*(go:build|\+build)[^\n]*!amd64' "$d"/*.go >/dev/null 2>&1 && return 0
+  for f in "$d"/*.go; do
+    [ -f "$f" ] || continue
+    base=$(basename "$f")
+    case "$base" in *_test.go) continue ;; esac
+    # an unsuffixed file (no GOOS/GOARCH in its name) with no constraint builds everywhere
+    printf '%s\n' "$base" | grep -qE "_($GOOS_RE|$GOARCH_RE)(_($GOARCH_RE))?\.go$" && continue
+    has_build_constraint "$f" || return 0
+  done
+  return 1
+}
+
 note "go_arch_scan - $(pwd)"
 note "toolchain: $([ $HAVE_GO -eq 1 ] && go version 2>/dev/null || echo 'go NOT FOUND - grep-only mode, all verdicts CHECK')"
 
@@ -162,10 +212,16 @@ if [ $HAVE_GO -eq 1 ]; then
       ok "per-directory sweep: no arm64-only package exclusions"
     fi
 
-    # Any other arm64-only resolution error
-    if [ -s "$TMP/deps-arm64.err" ] && [ ! -s "$TMP/deps-amd64.err" ]; then
+    # Any other arm64-only resolution error.
+    # `go` writes module download progress to STDERR, and the first invocation warms the
+    # cache for the second - so without filtering, the arm64 pass always "reports errors
+    # the amd64 pass did not" and the finding is pure ordering noise.
+    PROGRESS='^go: (downloading|extracting|finding|upgraded|added|to add module|downloading module)'
+    grep -vE "$PROGRESS" "$TMP/deps-arm64.err" 2>/dev/null | grep -v '^[[:space:]]*$' >"$TMP/e-arm64"
+    grep -vE "$PROGRESS" "$TMP/deps-amd64.err" 2>/dev/null | grep -v '^[[:space:]]*$' >"$TMP/e-amd64"
+    if [ -s "$TMP/e-arm64" ] && ! cmp -s "$TMP/e-arm64" "$TMP/e-amd64"; then
       check "arm64 resolution produced errors that amd64 did not; read them:"
-      sed 's/^/           /' "$TMP/deps-arm64.err" | head -10
+      sed 's/^/           /' "$TMP/e-arm64" | head -10
     fi
   fi
 else
@@ -251,8 +307,19 @@ irrelevant_path() {
 }
 
 find . -type d -name .git -prune -o -type f \
-  \( -name '*_amd64*.go' -o -name '*_amd64*.s' -o -name '*_386*.go' -o -name '*_386*.s' \) \
-  -print 2>/dev/null | sort >"$TMP/amd64files.raw"
+  \( -name '*_amd64*.go' -o -name '*_amd64*.s' \) \
+  -print 2>/dev/null | sort >"$TMP/amd64files.all"
+# _386 is deliberately NOT in the glob. The migration source for Graviton is x86-64, and
+# a 386/non-386 pair is complete for arm64 by construction. Measured: klauspost/compress
+# internal/regmask ships regmask_386.go (`//go:build 386`) beside regmask.go
+# (`//go:build !386`), and including _386 reported that correct pair as an amd64 problem.
+
+# Test files are a coverage question, not a build shape: an _amd64_test.go with no arm64
+# counterpart means that test never runs on Graviton, which is worth one line and is not
+# a blocker. Measured: minio internal/s3select/simdj's ONLY amd64-suffixed file is
+# reader_amd64_test.go, and treating it as a build shape accused a package that builds.
+grep -E '_test\.go$' "$TMP/amd64files.all" > "$TMP/amd64tests.txt" 2>/dev/null || true
+grep -vE '_test\.go$' "$TMP/amd64files.all" > "$TMP/amd64files.raw" 2>/dev/null || true
 : >"$TMP/amd64files.txt"
 while read -r f; do
   [ -n "$f" ] || continue
@@ -265,7 +332,8 @@ find . -type d -name .git -prune -o -type f \
 
 na=$(wc -l <"$TMP/amd64files.txt" | tr -d ' ')
 nr=$(wc -l <"$TMP/arm64files.txt" | tr -d ' ')
-note "         amd64/386-suffixed files: $na    arm64-suffixed files: $nr    (skipped $nskip non-linux-GOOS files)"
+nt=$(wc -l <"$TMP/amd64tests.txt" | tr -d ' ')
+note "         amd64-suffixed source files: $na    arm64-suffixed: $nr    (skipped $nskip non-linux-GOOS, $nt test files)"
 
 # Per-directory shape, using the suffix families
 if [ "$na" -gt 0 ]; then
@@ -285,22 +353,32 @@ if [ "$na" -gt 0 ]; then
 
   while read -r d; do
     [ -n "$d" ] || continue
-    has_arm64=0; has_fallback=0
-    ls "$d" 2>/dev/null | grep -q 'arm64' && has_arm64=1
-    # A fallback is a file in the same directory gated on !amd64, or named generic/purego/noasm
-    ls "$d" 2>/dev/null | grep -qE '_(generic|purego|noasm|portable|other|fallback)[^.]*\.(go|s)$' && has_fallback=1
-    grep -lsE '^//[[:space:]]*(go:build|\+build)[^\n]*!amd64' "$d"/*.go >/dev/null 2>&1 && has_fallback=1
-    if [ $has_arm64 -eq 1 ]; then
+    if ls "$d" 2>/dev/null | grep -q 'arm64'; then
       printf 'OK       Shape A (ported): %s\n' "$d"
-    elif [ $has_fallback -eq 1 ]; then
+    elif portable_sibling "$d"; then
       printf 'CHECK    Shape B (builds, read the fallback body): %s\n' "$d"
       CHECKS=$((CHECKS+1))
     else
-      printf 'CHECK    Shape B or C - no arm64 sibling and no obvious fallback: %s\n' "$d"
+      printf 'CHECK    Shape B or C - no arm64 sibling and no portable path found: %s\n' "$d"
       CHECKS=$((CHECKS+1))
     fi
   done <"$TMP/amd64dirs.txt"
   note "         (Shape C is confirmed only by 'build constraints exclude all Go files' in section 1)"
+fi
+
+# amd64-only tests: a coverage gap, reported once rather than per file
+if [ "${nt:-0}" -gt 0 ]; then
+  sed 's|/[^/]*$||' "$TMP/amd64tests.txt" | sort -u >"$TMP/amd64testdirs.txt"
+  ntd=0
+  while read -r d; do
+    [ -n "$d" ] || continue
+    ls "$d" 2>/dev/null | grep -qE '_arm64.*_test\.go$' && continue
+    ntd=$((ntd+1)); printf '           %s\n' "$d"
+  done <"$TMP/amd64testdirs.txt" >"$TMP/testgap.txt"
+  if [ -s "$TMP/testgap.txt" ]; then
+    check "amd64-only test files - these tests never run on Graviton (coverage gap, not a blocker):"
+    head -10 "$TMP/testgap.txt"
+  fi
 fi
 
 # Files constrained to 32-bit arm with no arm64 sibling: looks ported, is not
@@ -312,12 +390,14 @@ find . -type d -name .git -prune -o -type f \( -name '*_arm.go' -o -name '*_arm.
     done
 
 # Unconstrained .s files: compiled for EVERY architecture.
-# The filename filter must cover GOOS suffixes as well as GOARCH ones, and the
-# in-file check must scan the whole leading comment block (see has_build_constraint).
+# The filename filter must cover GOOS suffixes as well as GOARCH ones, the in-file check
+# must scan the whole leading comment block (see has_build_constraint), and a file inside
+# a non-linux GOOS package is not this target's problem (golang.org/x/sys/plan9/asm.s).
 find . -type d -name .git -prune -o -name '*.s' -print 2>/dev/null \
   | grep -vE "_($GOARCH_RE)[^/]*\.s$" \
   | grep -vE "_($GOOS_RE)([^/]*)?\.s$" \
   | while read -r f; do
+      irrelevant_path "$f" && continue
       has_build_constraint "$f" \
         || printf 'FINDING  unconstrained .s file - compiled for every architecture: %s\n' "$f"
     done >"$TMP/unconstrained.txt"
@@ -329,21 +409,32 @@ else
 fi
 
 # A fallback that is not an implementation.
-# Narrow deliberately: `panic("not implemented")` and `panic("Unsupported int size")`
-# occur all over any large vendor tree (go-cmp option stubs, json-iterator, go-winio's
-# ETW field encoder) and have nothing to do with architecture. Only report a panic whose
-# message names a platform or architecture, OR one inside an architecture-constrained file.
-ARCH_PANIC='panic\(("|`)[^"`]*(unsupported|not implemented|no asm|no assembly)[^"`]*(platform|architecture|arch|GOARCH|amd64|arm64|386|cpu)'
-ARCH_PANIC2='panic\(("|`)[^"`]*(platform|architecture|GOARCH)[^"`]*(unsupported|not supported|not implemented)'
-: >"$TMP/panics.txt"
-grep -rnEi --include='*.go' "$ARCH_PANIC|$ARCH_PANIC2" . 2>/dev/null >>"$TMP/panics.txt"
-# Plus any generic "not implemented" panic that sits in a file the architecture gates.
+# Two filters, both measured as necessary against containerd's vendor tree:
+#   - the message must name an ARCHITECTURE. "platform" alone matches grpc's
+#     `panic("RawConn functionality is not implemented for non-unix platforms.")`,
+#     and `panic("not implemented")` / `panic("Unsupported int size")` occur all over
+#     go-cmp, json-iterator and go-winio with no architecture meaning at all.
+#   - the file must not be excluded from linux/arm64 by its own constraint. wazero's
+#     isa_other.go is gated `!(amd64 || arm64)` and panics "unsupported architecture":
+#     correct code, never compiled here.
+ARCH_PANIC='panic\(("|`)[^"`]*(unsupported|not implemented|no asm|no assembly|not supported)[^"`]*(architecture|arch|GOARCH|amd64|arm64|aarch64|cpu|simd|sse|avx|neon)'
+ARCH_PANIC2='panic\(("|`)[^"`]*(architecture|GOARCH|amd64|arm64|aarch64)[^"`]*(unsupported|not supported|not implemented)'
+: >"$TMP/panics.raw"
+grep -rlEi --include='*.go' "$ARCH_PANIC|$ARCH_PANIC2" . 2>/dev/null >>"$TMP/panics.raw"
 while read -r f; do
   [ -n "$f" ] || continue
-  grep -nEi 'panic\(("|`)[^"`]*(unsupported|not implemented)' "$f" 2>/dev/null \
-    | sed "s|^|$f:|" >>"$TMP/panics.txt"
+  grep -qEi 'panic\(("|`)[^"`]*(unsupported|not implemented)' "$f" 2>/dev/null \
+    && printf '%s\n' "$f" >>"$TMP/panics.raw"
 done <"$TMP/amd64files.txt"
-sort -u "$TMP/panics.txt" -o "$TMP/panics.txt" 2>/dev/null
+sort -u "$TMP/panics.raw" -o "$TMP/panics.raw" 2>/dev/null
+: >"$TMP/panics.txt"
+while read -r f; do
+  [ -f "$f" ] || continue
+  irrelevant_path "$f" && continue
+  excluded_from_target "$f" && continue
+  grep -nEi "$ARCH_PANIC|$ARCH_PANIC2|panic\\((\"|\`)[^\"\`]*(unsupported|not implemented)" "$f" 2>/dev/null \
+    | sed "s|^|$f:|" >>"$TMP/panics.txt"
+done <"$TMP/panics.raw"
 if [ -s "$TMP/panics.txt" ]; then
   finding "fallback paths that panic rather than implement (read each one):"
   sed 's/^/           /' "$TMP/panics.txt" | head -15
@@ -384,15 +475,24 @@ else
   check "'file' not available: native artifacts not judged by content"
 fi
 
-# Downloads naming an architecture
-if grep -rqnE 'https?://[^ "'"'"']*(amd64|x86_64|x86-64)' . \
-     --include='Dockerfile*' --include='Makefile' --include='*.mk' --include='*.sh' \
-     --include='*.yml' --include='*.yaml' --exclude-dir=.git --exclude-dir=vendor 2>/dev/null; then
-  finding "downloads hardcoding an x86 architecture in the URL:"
-  grep -rnE 'https?://[^ "'"'"']*(amd64|x86_64|x86-64)' . \
-    --include='Dockerfile*' --include='Makefile' --include='*.mk' --include='*.sh' \
-    --include='*.yml' --include='*.yaml' --exclude-dir=.git --exclude-dir=vendor 2>/dev/null \
-    | sed 's/^/           /' | head -20
+# Downloads naming an architecture.
+# Aggregate: a repo's test and docs scripts commonly fetch the same amd64 tool a dozen
+# times (minio: 16 hits for `mc`), and emitting one finding per line buries everything
+# else. One finding, a count, and the distinct URLs.
+DL_X86='https?://[^ "'"'"']*(amd64|x86_64|x86-64)'
+grep -rnE "$DL_X86" . \
+  --include='Dockerfile*' --include='Makefile' --include='*.mk' --include='*.sh' \
+  --include='*.yml' --include='*.yaml' --exclude-dir=.git --exclude-dir=vendor 2>/dev/null \
+  >"$TMP/dl.txt"
+if [ -s "$TMP/dl.txt" ]; then
+  ndl=$(wc -l <"$TMP/dl.txt" | tr -d ' ')
+  grep -ohE "$DL_X86" "$TMP/dl.txt" 2>/dev/null | sort -u >"$TMP/dlurls.txt"
+  nurl=$(wc -l <"$TMP/dlurls.txt" | tr -d ' ')
+  finding "x86-hardcoded download URLs: $ndl occurrence(s) of $nurl distinct URL(s). Make each derive the arch from \$TARGETARCH or uname -m:"
+  sed 's|^|           |' "$TMP/dlurls.txt" | head -12
+  [ "$nurl" -gt 12 ] && note "           ... and $((nurl-12)) more (full list: grep -rnE '$DL_X86' .)"
+  note "           first occurrences:"
+  sed 's|^|             |' "$TMP/dl.txt" | head -5
 else
   ok "no x86-hardcoded download URLs"
 fi
@@ -425,10 +525,21 @@ if grep -rqn 'GOAMD64' . --exclude-dir=.git --exclude-dir=vendor 2>/dev/null; th
   grep -rn 'GOAMD64' . --exclude-dir=.git --exclude-dir=vendor 2>/dev/null | sed 's/^/           /' | head -5
 fi
 
-# A --platform with no GOARCH nearby: arm64 image, amd64 binary
+# A --platform with no GOARCH nearby: arm64 image, amd64 binary.
+#
+# BUT a cross-compilation wrapper sets GOARCH for you, and accusing a repo that uses one
+# is a false positive on idiomatic code. Measured on containerd's
+# .github/workflows/release/Dockerfile: it uses tonistiigi/xx, where `xx-go --wrap`
+# derives GOARCH from $TARGETPLATFORM and `xx-verify` then checks the output binary's
+# architecture - so there is no literal GOARCH=$TARGETARCH anywhere and the Dockerfile
+# is correct. Recognize the wrappers before claiming the defect.
+XX_WRAPPER='xx-go|xx-info|xx-verify|xx-apt|xx-cc|xx-clang|--wrap|GOARCH=\$\{?TARGETARCH|GOARCH="?\$\{?TARGETARCH|goreleaser|ko build|CC=\$\(xx-info\)'
 for df in $(find . -name 'Dockerfile*' -not -path './vendor/*' -not -path './.git/*' 2>/dev/null); do
-  if grep -q -- '--platform' "$df" 2>/dev/null && ! grep -qE 'GOARCH[[:space:]]*=[[:space:]]*\$\{?TARGETARCH' "$df" 2>/dev/null; then
-    finding "$df uses --platform but never sets GOARCH=\$TARGETARCH (arm64 image, amd64 binary)"
+  grep -q -- '--platform' "$df" 2>/dev/null || continue
+  if grep -qE "$XX_WRAPPER" "$df" 2>/dev/null; then
+    ok "$df uses --platform with a cross-compile wrapper (xx-go / TARGETARCH); verify the built binary's arch in Phase 3.3"
+  else
+    finding "$df uses --platform but never sets GOARCH=\$TARGETARCH and uses no cross-compile wrapper (arm64 image, amd64 binary)"
   fi
 done
 
