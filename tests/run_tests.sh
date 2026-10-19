@@ -155,8 +155,8 @@ if command -v go >/dev/null 2>&1 && command -v cc >/dev/null 2>&1; then
   cd "$ROOT" || exit 2
   rm -rf tests/memory-model/graviton-validation
   # fail()/pass() print the LABEL first, then the verdict - assert that order.
-  assert_has   "race check executed, not skipped" "$OUT5" '^9 +go test -race[^\n]*(FAIL|PASS)'
-  assert_lacks "race check not reported NOT RUN"   "$OUT5" '^9 +go test -race[^\n]*NOT RUN'
+  assert_has   "race check executed, not skipped" "$OUT5" '^9 +go test -race.*(FAIL|PASS)'
+  assert_lacks "race check not reported NOT RUN"   "$OUT5" '^9 +go test -race.*NOT RUN'
   assert_has   "known race in the fixture reported" "$OUT5" 'DATA RACE report'
   assert_lacks "no stale 'emulation does not count' claim" "$OUT5" 'emulation does NOT satisfy|QEMU does not reproduce'
   assert_lacks "no cross-compiled baseline passed off as a baseline" "$OUT5" "x86 baseline: 0 race report"
