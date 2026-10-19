@@ -171,15 +171,19 @@ if [ $NATIVE_ARM64 -eq 1 ]; then
   else
     echo "   x86 baseline: NOT RUN on this $HOSTARCH host. Without it, ARM64 and"
     echo "                 PRE-EXISTING cannot be told apart - run this script on an x86"
-    echo "                 host too, or under 'docker run --platform linux/amd64'." 
+    echo "                 host too, or under 'docker run --platform linux/amd64'."
+  fi
 else
   notrun "8  go test on arm64" "host is $HOSTARCH"
 fi
 
 # ------------------------------------------ 9. go test -race (criterion 9)
-# The reason this skill exists. Mandatory, and only real arm64 hardware counts.
+# The reason this skill exists. The DETECTOR is architecture-independent (measured:
+# the same bug reported 3 races on both a c7g and a c7i), so this is worth running
+# wherever it runs. What arm64 adds is interleaving diversity, and the fact that a
+# race here is a 22-38% production event instead of 0 in 1.2e9 samples.
 if [ $NATIVE_ARM64 -eq 0 ]; then
-  notrun "9  go test -race on arm64" "host is $HOSTARCH - emulation does not count"
+  notrun "9  go test -race on arm64" "host is $HOSTARCH - run it here anyway for detection"
 elif ! command -v cc >/dev/null 2>&1 && ! command -v gcc >/dev/null 2>&1; then
   notrun "9  go test -race on arm64" "no C compiler: the race detector cannot build"
 else
