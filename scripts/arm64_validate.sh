@@ -139,6 +139,9 @@ fi
 if [ $NATIVE_ARM64 -eq 1 ]; then
   # shellcheck disable=SC2086
   CGO_ENABLED="$CGO" GOOS=linux GOARCH=arm64 go vet $TAGFLAG ./... >"$RAW/arm64-vet.log" 2>&1
+  # go vet is static analysis, so GOARCH=amd64 IS a valid baseline here: it analyses
+  # the amd64 build without executing anything. This is the one baseline that does not
+  # need an x86 host.
   # shellcheck disable=SC2086
   CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go vet $TAGFLAG ./... >"$RAW/amd64-vet.log" 2>&1
   if diff -q "$RAW/amd64-vet.log" "$RAW/arm64-vet.log" >/dev/null 2>&1; then
@@ -158,9 +161,17 @@ if [ $NATIVE_ARM64 -eq 1 ]; then
   else
     fail "8  go test on arm64" "$RAW/arm64-test.log"
   fi
-  # shellcheck disable=SC2086
-  CGO_ENABLED=0 GOARCH=amd64 go test $TAGFLAG $SKIPFLAG ./... >"$RAW/amd64-test.log" 2>&1
-  echo "   baseline: $RAW/amd64-test.log  (classify each failure ARM64 / PRE-EXISTING / INFRA)"
+  # The x86 baseline for classification. On an arm64 host, `GOARCH=amd64 go test`
+  # cross-compiles and cannot execute, so it produces a log that proves nothing -
+  # run it only where it actually runs, and say so otherwise.
+  if [ "$HOSTARCH" = "x86_64" ] || [ "$HOSTARCH" = "amd64" ]; then
+    # shellcheck disable=SC2086
+    CGO_ENABLED=0 go test $TAGFLAG $SKIPFLAG ./... >"$RAW/amd64-test.log" 2>&1
+    echo "   x86 baseline (native): $RAW/amd64-test.log  (classify each failure ARM64 / PRE-EXISTING / INFRA)"
+  else
+    echo "   x86 baseline: NOT RUN on this $HOSTARCH host. Without it, ARM64 and"
+    echo "                 PRE-EXISTING cannot be told apart - run this script on an x86"
+    echo "                 host too, or under 'docker run --platform linux/amd64'." 
 else
   notrun "8  go test on arm64" "host is $HOSTARCH"
 fi
@@ -181,20 +192,36 @@ else
   if [ "$NRACE" -gt 0 ]; then
     fail "9  go test -race on arm64" "$NRACE DATA RACE report(s) - see $RAW/arm64-race.log"
     echo
-    echo "   A data race is BLOCKING. It is a pre-existing defect that arm64's weak memory"
-    echo "   ordering makes observable. Copy the FULL detector output into the report - both"
-    echo "   stacks are the fix. Never work around it with a sleep, a reorder or a runtime"
-    echo "   setting. Run the same command on the x86 baseline and report both results."
+    echo "   A data race is BLOCKING. It is a pre-existing defect, and on Graviton it is a"
+    echo "   22-38% event where on x86 it was 0 in 1.2e9 samples (measured, see the skill's"
+    echo "   README). Copy the FULL detector output into the report - both stacks are the fix."
+    echo "   Never work around it with a sleep, a reorder or a runtime setting."
     echo
-    # The x86 comparison, which decides how the finding is framed
-    CGO_ENABLED=1 GOARCH=amd64 go test -race -count="$COUNT" $TAGFLAG $SKIPFLAG ./... \
-      >"$RAW/amd64-race.log" 2>&1
-    NB=$(grep -c 'WARNING: DATA RACE' "$RAW/amd64-race.log" 2>/dev/null); NB=${NB:-0}
-    echo "   x86 baseline: $NB race report(s) in $RAW/amd64-race.log"
-    if [ "$NB" -gt 0 ]; then
-      echo "   -> reachable on both: the project has simply never run -race"
+    # The x86 baseline decides how the finding is framed - but it can only be obtained
+    # by EXECUTING on x86. `GOARCH=amd64 go test` on an arm64 host cross-compiles and
+    # cannot run the test binary, so it reports 0 races because nothing executed.
+    # Reading that 0 as "arm64 only" is exactly the empty-result-as-fact error this
+    # skill exists to prevent, and an earlier version of this script made it.
+    if [ "$HOSTARCH" = "x86_64" ] || [ "$HOSTARCH" = "amd64" ]; then
+      CGO_ENABLED=1 go test -race -count="$COUNT" $TAGFLAG $SKIPFLAG ./... \
+        >"$RAW/amd64-race.log" 2>&1
+      NB=$(grep -c 'WARNING: DATA RACE' "$RAW/amd64-race.log" 2>/dev/null); NB=${NB:-0}
+      echo "   x86 baseline (native, this host): $NB race report(s) in $RAW/amd64-race.log"
+      if [ "$NB" -gt 0 ]; then
+        echo "   -> reachable on both: the project has simply never run -race"
+      else
+        echo "   -> not observed on x86 in $COUNT run(s). Raise --count before concluding"
+        echo "      'arm64 only': the detector is architecture-independent, so a race it"
+        echo "      finds on arm64 is usually findable on x86 too, just less often."
+      fi
     else
-      echo "   -> arm64 only: the weak memory model is what made it observable"
+      notrun "   x86 baseline race comparison" "this host is $HOSTARCH"
+      echo "   The comparison needs a run that EXECUTES on x86: a real x86 host, an x86 CI"
+      echo "   runner, or \`docker run --platform linux/amd64\`. Setting GOARCH=amd64 here"
+      echo "   only cross-compiles - it would report 0 races because nothing ran, and"
+      echo "   reporting that as 'arm64 only' would be wrong."
+      echo "   Until then the finding is: a data race, blocking, architecture of origin"
+      echo "   UNDETERMINED."
     fi
   elif [ $RACE_RC -ne 0 ]; then
     fail "9  go test -race on arm64" "no race, but tests failed - see $RAW/arm64-race.log"
