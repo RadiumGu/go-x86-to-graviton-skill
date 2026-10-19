@@ -1,0 +1,25 @@
+arm64_validate - /repos/payforadoption-go
+host:      aarch64   go: go1.27.2
+logs:      graviton-validation/raw/
+capability: native arm64 - build, vet, test and race are all measurable here
+CGO_ENABLED: 0 (given)
+
+1  cross-build linux/arm64 (CGO off)         PASS   (graviton-validation/raw/arm64-crossbuild.log)
+2  native arm64 build (CGO=0)                PASS   (graviton-validation/raw/arm64-build.log)
+2b release build: CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -a -installsuffix cgo -o /tmp/app . PASS   (graviton-validation/raw/arm64-release-build.log)
+5  go vet (arm64 target vs amd64 baseline, both static) PASS   (no arm64-only findings)
+8  go test on arm64                          PASS   (graviton-validation/raw/arm64-test.log)
+   x86 baseline: NOT RUN on this aarch64 host. Without it, ARM64 and
+                 PRE-EXISTING cannot be told apart - run this script on an x86
+                 host too, or under 'docker run --platform linux/amd64'.
+9  go test -race on arm64 (target)           PASS   (no race observed in 5 run(s) of the suite)
+   (evidence, not proof: the detector reports only the races it observes.
+    Raise --count, and run it on the other architecture too.)
+13 petadoptions: aarch64                     PASS   (ELF 64-bit LSB executable, ARM aarch64, version 1 (SYSV), statically linked, Go BuildID=woFvV9ckTm3KfmHIlXcW/nfHJDBgnyQWgIw4Tcuo5/nHaHS4GCiqAQHgyq4VFd/nYS-lqT05IcfbRYqic_n, BuildID[sha1]=8f3cf6e29194681b11b8f3c402988d7ec1f4951b, with debug_info, not stripped)
+
+== Result ==
+failed checks: 0
+
+Startup validation (criterion 12) is not automated here: run the application and
+confirm runtime.GOARCH reports arm64, then serve one real request.
+See phases/phase3-validation.md section 3.4.

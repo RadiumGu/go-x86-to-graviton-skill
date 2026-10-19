@@ -317,6 +317,57 @@ both**. An earlier version of this skill said emulation and x86 "do not count" f
 race criterion; that was wrong. Detection is instrumentation, not a hardware probe. What
 arm64 adds is different interleaving, and the 22-38% manifestation rate above.
 
+### All four cgo routes, executed
+
+| Route | Subject | Result |
+|---|---|---|
+| 1 vendored C source | `mattn/go-sqlite3` | 6 C/H files in the module, **0** prebuilt archives, **0** files with unguarded x86 intrinsics. Built and ran: `sqlite=3.53.4`. No availability question exists, only a compiler requirement |
+| 2 system library | a module linking `-lz` | Built and ran; CRC32 from system zlib matched Go's stdlib exactly (`2979356288` both), so the C library really executed. `ldd` resolved `libz.so.1` to an aarch64 file. The pkg-config form worked too. An unconditional `#cgo CFLAGS: -msse4.2` failed with `gcc: error: unrecognized command-line option '-msse4.2'` |
+| 3 bundled archive | `confluent-kafka-go/v2` | v2.0.2 → v2.12.0 **all** bundle 7 archives including `librdkafka_glibc_linux_arm64.a` and `librdkafka_musl_linux_arm64.a`, so **no arm64 version floor exists** in the v2 line. `file` on the `.a` says `current ar archive` with no architecture; a extracted member says `ELF … ARM aarch64`. Built and ran: `librdkafka=0x20c00ff (2.12.0)`. `-tags dynamic` (the Route 3 → 2 conversion) failed with `Package rdkafka was not found in the pkg-config search path` — the conversion's cost, made concrete |
+| 4 downloaded at build time | `grpc-health-probe`, `protoc` | The releases-API listing works. Downloaded and ran the arm64 binary (`0.4.41`); the wrong-arch one gave `cannot execute binary file: Exec format error`. **New finding: `protoc` uses a third naming vocabulary** — `protoc-36.2-linux-aarch_64.zip`, with an underscore, neither `arm64` nor `aarch64` |
+
+Cross-compiling cgo, two corrections: `dnf install gcc-aarch64-linux-gnu` finds **no such
+package on Amazon Linux 2023**, so an AL2023 build host cannot cross-compile cgo without
+building a toolchain first; and without `CC` the failure is misleading —
+`# runtime/cgo` / `gcc_arm64.S: Error: no such instruction: 'stp x29,x30,[sp,'`, which
+reads like a Go runtime bug and is a missing cross-compiler.
+
+A documented ambiguity that would have misrouted the fix: a package whose files are **all
+cgo files** emits, under `CGO_ENABLED=0`, `build constraints exclude all Go files in
+<dir>` — verbatim the Shape C message. Measured: `CGO_ENABLED=1` → `CgoFiles=[main.go]
+Ignored=[]`; `CGO_ENABLED=0` → the Shape C error. For a *mixed* package the symptom is
+different (`GoFiles=[plain.go] CgoFiles=[] Ignored=[only_cgo.go]`). The scan now resolves
+the tree a third time with cgo off and routes such packages to Phase 2.1, not 2.2.
+
+### A complete three-phase run on two of the author's own repositories
+
+See [`examples/worked-example/payforadoption-go/`](examples/worked-example/payforadoption-go/)
+for the report and the raw logs.
+
+| | `sql-replay` | `payforadoption-go` |
+|---|---|---|
+| Shape | pure Go, 264 packages, 15 direct deps, no Dockerfile | pure Go, 575 packages, 79 direct deps, arm64 EKS service with its own Dockerfile |
+| Phase 1 | **0 findings, 0 checks** | **1 finding** (no `go test -race` anywhere), 1 check (a README documents an amd64-only build of a different image) |
+| Phase 2 | no changes | no code changes; `go.mod`/`go.sum` byte-identical |
+| Phase 3 | build, vet, test and `-race` ×3 all PASS on arm64 | cross-build, native build, **the project's own release command**, vet, test and `-race` ×5 all PASS on arm64; binary is `ELF … ARM aarch64, statically linked` |
+
+Three defects in the skill came out of that run, all now fixed and pinned by fixtures:
+Dockerfile comments were treated as code, a literal `GOARCH=arm64` was not accepted as
+setting the target (so the most Graviton-ready Dockerfile shape got accused), and
+documentation was graded as a build file. Underneath the third was a shell bug worth
+knowing: `grep -rn -- PATTERN . --include='*.md'` filters nothing, because `--` ends
+option processing and `--include` becomes a path.
+
+Two things the run established that the documents had not said:
+
+- **A resolved package-count difference between architectures is normal.** amd64 resolves
+  576 packages here and arm64 575; the one package is `vendor/golang.org/x/sys/cpu`, the
+  standard library's own vendored copy. The **non-stdlib** set is identical, and that is
+  the comparison that carries information. The scan now reports it that way.
+- **`go vet` needs no arm64 host** — it is static analysis, so criterion 5 and its
+  baseline run anywhere. The validator was gating it on the host architecture, the same
+  mistake it had already been corrected for on the race check.
+
 ### Scanner, against four real repositories
 
 Run on containerd (vendored, 1122 packages, 2 cgo packages), minio (1319 packages,
@@ -345,15 +396,18 @@ specific output line, and each exists because that defect shipped. Run in CI on
 
 ### Still not verified
 
-- the cgo Route 2 / 3 / 4 resolution commands against live distro indexes and module
-  caches. containerd's two cgo packages (`miekg/pkcs11` via `-ldl`,
-  `containerd/btrfs/v2`) were detected and classified, but their aarch64 libraries were
-  not sourced and built
-- container and deployment-descriptor validation (Phase 3.3), including the in-image
-  native-file scan
-- `go.work` workspaces
-- `arm64_validate.sh`'s race branch firing on a real `WARNING: DATA RACE` in a project's
-  own suite (it was exercised on the memory-model fixture, not through the script)
+- **container and deployment-descriptor validation (Phase 3.3)**, including the in-image
+  native-file scan. No container runtime was available in the validation environment, so
+  criterion 6 came back `NOT RUN` on both repositories
+- **startup validation (criterion 12)** on a real service. `payforadoption-go` needs
+  DynamoDB, RDS and SSM to start, so it was not run
+- **`go.work` workspaces**. Neither repository uses one
+- the **distro-index queries** for Route 2 (`apt-cache policy ...:arm64` via
+  `ports.ubuntu.com`, `dnf --forcearch=aarch64`, `apk policy`). Route 2 itself was
+  verified by building and running against a system library; the *availability lookup*
+  commands for other distributions were not executed
+- a Route 2 library that is genuinely **absent** for aarch64, which is the case that
+  escalates to a user decision. Every library reached in this round had an aarch64 build
 
 No dependency version floors are asserted anywhere in the skill. A recalled floor is a
 wrong verdict waiting to happen, so the documents give the check to run instead.

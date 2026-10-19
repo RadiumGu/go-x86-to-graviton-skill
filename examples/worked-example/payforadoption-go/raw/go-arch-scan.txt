@@ -1,0 +1,37 @@
+go_arch_scan - /repos/payforadoption-go
+toolchain: go version go1.27.2 linux/arm64
+
+== 1. Resolution for linux/arm64 ==
+OK       resolved 575 packages for linux/arm64
+OK       no reachable Shape C package (go list -deps for arm64)
+OK       per-directory sweep: no arm64-only package exclusions
+
+== 2. cgo ==
+OK       no package in the resolved set uses cgo (pure Go: cross-compiles without a C toolchain)
+OK       no x86-only flags in #cgo directives
+
+== 3. Build constraints and assembly (vendor/ included deliberately) ==
+         amd64-suffixed source files: 0    arm64-suffixed: 0    (skipped 0 non-linux-GOOS, 0 test files)
+OK       no unconstrained .s files
+
+== 4. Committed native artifacts ==
+OK       no committed native artifacts
+OK       no x86-hardcoded download URLs
+
+== 5. Architecture selection in build and deployment configuration ==
+OK       no --platform=linux/amd64 in build files
+CHECK    documentation shows an amd64-only build command (not a build-file defect):
+           ./benchmark/README.md:46:docker buildx build -t drill-payforadoption . --platform=linux/amd64
+           ./graviton-validation/raw/go-arch-scan.txt:22:OK       no --platform=linux/amd64 in build files
+OK       GOARCH not hardcoded to amd64 in build scripts
+OK       ./Dockerfile sets GOARCH for the target explicitly in its go build
+
+== 6. Behavioral leads (compile cleanly; verified only by Phase 3) ==
+FINDING  no 'go test -race' anywhere in the build or CI configuration - the weak-memory-order risk is UNMEASURED
+
+== Result ==
+findings: 1    checks: 1
+
+A CHECK is a lead, not a verdict. Resolve every one before writing a PASS.
+Shape C blockers, cgo routes and the race result all require the full skill:
+  phases/phase1-static-analysis.md, phase2-resolution.md, phase3-validation.md

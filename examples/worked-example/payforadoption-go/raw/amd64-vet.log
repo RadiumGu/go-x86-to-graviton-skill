@@ -1,0 +1,1 @@
+main.go:179:3: misuse of unbuffered os.Signal channel as argument to signal.Notify
