@@ -1,0 +1,12 @@
+# Correct, and a shape a naive check accuses:
+#   - this comment mentions `docker buildx build --platform linux/arm64`, and a grep
+#     over the raw file sees --platform here
+#   - the build hardcodes GOARCH=arm64 rather than $TARGETARCH, deliberately, so a bare
+#     `docker build` fails loudly instead of silently shipping amd64
+# Measured against RadiumGu/one-observability-demo PetAdoptions/payforadoption-go.
+FROM public.ecr.aws/docker/library/golang:1.25 AS builder
+WORKDIR /src
+COPY . .
+RUN CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -o app ./cmd/app
+FROM public.ecr.aws/docker/library/alpine:3.22.1
+COPY --from=builder /src/app /app

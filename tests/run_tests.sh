@@ -88,6 +88,12 @@ assert_lacks "GOOS-suffixed .s skipped" "$OUT" 'sys_darwin\.s'
 assert_has   "--platform=linux/amd64 reported" "$OUT" 'FINDING.*--platform=linux/amd64'
 assert_lacks "xx-go wrapper NOT accused" "$OUT" 'FINDING.*Dockerfile\.xx'
 assert_has   "xx-go wrapper recognized" "$OUT" 'OK.*Dockerfile\.xx.*cross-compile wrapper'
+# A literal GOARCH=arm64 is a valid way to set the target; a comment mentioning
+# --platform is not a --platform usage. Both measured on payforadoption-go.
+assert_lacks "literal GOARCH=arm64 NOT accused"     "$OUT" 'FINDING.*Dockerfile\.literal'
+assert_has   "literal GOARCH=arm64 recognized"      "$OUT" 'OK.*Dockerfile\.literal.*GOARCH'
+assert_lacks "README amd64 command is not a FINDING" "$OUT" 'FINDING.*docs/README\.md'
+assert_has   "README amd64 command is a CHECK"       "$OUT" 'CHECK.*documentation shows an amd64-only build'
 # build config
 assert_has "GOARCH=amd64 in Makefile reported" "$OUT" 'FINDING.*GOARCH hardcoded to amd64'
 assert_has "GOAMD64 noted"                     "$OUT" 'CHECK.*GOAMD64'

@@ -538,12 +538,29 @@ fi
 # ------------------------------------------------------- 5. build config / IaC
 head2 "5. Architecture selection in build and deployment configuration"
 
-if grep -rqn -- '--platform=linux/amd64' . --exclude-dir=.git --exclude-dir=vendor 2>/dev/null; then
+# NOTE on `--`: it ends option processing, so `grep -rn -- PATTERN . --include=...`
+# silently treats --include as a PATH and the filter never applies. The pattern here
+# starts with a dash, so it is passed with -e instead and the filters stay effective.
+# Measured: with `--` the exclusion was ignored and a Dockerfile hit was reported twice,
+# once correctly as a build-file defect and once wrongly as a documentation hit.
+PLAT_AMD64='--platform=linux/amd64'
+if grep -rn --exclude-dir=.git --exclude-dir=vendor \
+     --exclude='*.md' --exclude='*.rst' --exclude='*.txt' \
+     -e "$PLAT_AMD64" . >"$TMP/plat.txt" 2>/dev/null && [ -s "$TMP/plat.txt" ]; then
   finding "--platform=linux/amd64 pins a stage to x86:"
-  grep -rn -- '--platform=linux/amd64' . --exclude-dir=.git --exclude-dir=vendor 2>/dev/null \
-    | sed 's/^/           /' | head -10
+  sed 's/^/           /' "$TMP/plat.txt" | head -10
 else
-  ok "no --platform=linux/amd64"
+  ok "no --platform=linux/amd64 in build files"
+fi
+# Documentation is a separate, lower-severity class: a README telling a human to build
+# amd64 is worth knowing and is not a build-stage defect. Measured: payforadoption-go's
+# benchmark/README.md carries `docker buildx build ... --platform=linux/amd64` for a
+# different image entirely, and reporting it as a pinned stage was wrong.
+if grep -rn --include='*.md' --include='*.rst' --include='*.txt' \
+     --exclude-dir=.git --exclude-dir=vendor \
+     -e "$PLAT_AMD64" . >"$TMP/platdoc.txt" 2>/dev/null && [ -s "$TMP/platdoc.txt" ]; then
+  check "documentation shows an amd64-only build command (not a build-file defect):"
+  sed 's/^/           /' "$TMP/platdoc.txt" | head -5
 fi
 
 if grep -rqnE 'GOARCH[[:space:]]*[:=?]{0,2}[[:space:]]*"?amd64' . \
@@ -563,21 +580,48 @@ if grep -rqn 'GOAMD64' . --exclude-dir=.git --exclude-dir=vendor 2>/dev/null; th
   grep -rn 'GOAMD64' . --exclude-dir=.git --exclude-dir=vendor 2>/dev/null | sed 's/^/           /' | head -5
 fi
 
-# A --platform with no GOARCH nearby: arm64 image, amd64 binary.
+# A --platform with nothing that sets GOARCH for the target: arm64 image, amd64 binary.
 #
-# BUT a cross-compilation wrapper sets GOARCH for you, and accusing a repo that uses one
-# is a false positive on idiomatic code. Measured on containerd's
-# .github/workflows/release/Dockerfile: it uses tonistiigi/xx, where `xx-go --wrap`
-# derives GOARCH from $TARGETPLATFORM and `xx-verify` then checks the output binary's
-# architecture - so there is no literal GOARCH=$TARGETARCH anywhere and the Dockerfile
-# is correct. Recognize the wrappers before claiming the defect.
-XX_WRAPPER='xx-go|xx-info|xx-verify|xx-apt|xx-cc|xx-clang|--wrap|GOARCH=\$\{?TARGETARCH|GOARCH="?\$\{?TARGETARCH|goreleaser|ko build|CC=\$\(xx-info\)'
+# Three things this must get right, each measured against a real repository:
+#
+#  1. COMMENTS DO NOT COUNT. payforadoption-go's Dockerfile mentions
+#     `docker buildx build --platform linux/arm64` inside a `#` comment explaining why
+#     a sibling script is used; grepping the raw file saw `--platform` and fired.
+#  2. A LITERAL GOARCH COUNTS. That same Dockerfile does
+#     `RUN CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build ...` - it hardcodes arm64
+#     deliberately, so a bare `docker build` fails loudly instead of silently shipping
+#     amd64. That is the most Graviton-ready form there is, and the check accused it
+#     because it only recognized GOARCH=$TARGETARCH.
+#  3. A CROSS-COMPILE WRAPPER COUNTS. containerd's release Dockerfile uses
+#     tonistiigi/xx, where `xx-go --wrap` derives GOARCH from $TARGETPLATFORM.
+XX_WRAPPER='xx-go|xx-info|xx-verify|xx-apt|xx-cc|xx-clang|--wrap|goreleaser|ko build|CC=\$\(xx-info\)'
+GOARCH_SET='GOARCH[[:space:]]*=[[:space:]]*"?\$\{?TARGETARCH|GOARCH[[:space:]]*=[[:space:]]*"?(arm64|\$\{?GOARCH)'
 for df in $(find . -name 'Dockerfile*' -not -path './vendor/*' -not -path './.git/*' 2>/dev/null); do
-  grep -q -- '--platform' "$df" 2>/dev/null || continue
-  if grep -qE "$XX_WRAPPER" "$df" 2>/dev/null; then
+  # Strip comments before looking for anything. A Dockerfile comment starts with #.
+  sed 's/[[:space:]]*#.*$//' "$df" >"$TMP/df.stripped" 2>/dev/null
+  grep -q -- '--platform' "$TMP/df.stripped" 2>/dev/null || continue
+  if grep -qE "$XX_WRAPPER" "$TMP/df.stripped" 2>/dev/null; then
     ok "$df uses --platform with a cross-compile wrapper (xx-go / TARGETARCH); verify the built binary's arch in Phase 3.3"
+  elif grep -qE "$GOARCH_SET" "$TMP/df.stripped" 2>/dev/null; then
+    ok "$df uses --platform and sets GOARCH for the target explicitly"
   else
-    finding "$df uses --platform but never sets GOARCH=\$TARGETARCH and uses no cross-compile wrapper (arm64 image, amd64 binary)"
+    finding "$df uses --platform but nothing sets GOARCH for the target, and it uses no cross-compile wrapper (arm64 image, amd64 binary)"
+  fi
+done
+# The inverse check, which is the one that actually matters for a repo like this: a
+# Dockerfile that builds Go but never names an architecture at all gets the builder's.
+# And a Dockerfile that DOES name it gets an explicit OK - this skill records the
+# correct cases on purpose, so that nobody "fixes" them later.
+for df in $(find . -name 'Dockerfile*' -not -path './vendor/*' -not -path './.git/*' 2>/dev/null); do
+  sed 's/[[:space:]]*#.*$//' "$df" >"$TMP/df.stripped" 2>/dev/null
+  grep -qE '^[[:space:]]*RUN[^#]*go build' "$TMP/df.stripped" 2>/dev/null || continue
+  grep -q -- '--platform' "$TMP/df.stripped" 2>/dev/null && continue   # handled above
+  if grep -qE "$GOARCH_SET" "$TMP/df.stripped" 2>/dev/null; then
+    ok "$df sets GOARCH for the target explicitly in its go build"
+  elif grep -qE "$XX_WRAPPER" "$TMP/df.stripped" 2>/dev/null; then
+    ok "$df builds through a cross-compile wrapper"
+  else
+    check "$df runs 'go build' and names no architecture: the binary gets the BUILDER's arch. Fine under 'buildx --platform', broken under a bare 'docker build'"
   fi
 done
 
