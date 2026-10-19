@@ -191,6 +191,30 @@ if [ $HAVE_GO -eq 1 ]; then
   else
     ok "resolved $npkg packages for linux/arm64"
 
+    # The deployment's own CGO_ENABLED, if it is 0, can turn a pure-cgo package into
+    # something that looks exactly like a Shape C blocker. Measured on go1.27.2: a
+    # package whose only file carries `import "C"` resolves as CgoFiles=[main.go] with
+    # CGO_ENABLED=1, and with CGO_ENABLED=0 emits
+    #   package X: build constraints exclude all Go files in <dir>
+    # - verbatim the Shape C message. The fix is Phase 2.1 (cgo), not Phase 2.2
+    # (constraints), so the two must be told apart before a verdict is written.
+    CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go list -deps ./... \
+      >/dev/null 2>"$TMP/deps-nocgo.err"
+    grep 'build constraints exclude all Go files' "$TMP/deps-nocgo.err" 2>/dev/null \
+      | sed 's|.*exclude all Go files in ||' | sort -u >"$TMP/nocgo.dirs"
+    grep 'build constraints exclude all Go files' "$TMP/deps-arm64.err" 2>/dev/null \
+      | sed 's|.*exclude all Go files in ||' | sort -u >"$TMP/cgo.dirs"
+    comm -23 "$TMP/nocgo.dirs" "$TMP/cgo.dirs" 2>/dev/null >"$TMP/cgoonly.dirs"
+    nco=$(wc -l <"$TMP/cgoonly.dirs" | tr -d ' ')
+    if [ "${nco:-0}" -gt 0 ]; then
+      check "$nco package(s) resolve ONLY with cgo enabled - they are pure-cgo packages, NOT Shape C:"
+      sed 's|^|           |' "$TMP/cgoonly.dirs" | head -8
+      note "           With CGO_ENABLED=0 each emits 'build constraints exclude all Go files',"
+      note "           which reads as a Shape C blocker and would route the fix to Phase 2.2."
+      note "           The fix is Phase 2.1 (cgo). If the deployment sets CGO_ENABLED=0, the"
+      note "           build is already broken on every architecture, not just arm64."
+    fi
+
     # STEP 2 - Shape C reachable through an import: blocks the build today.
     n=$(grep -c 'build constraints exclude all Go files' "$TMP/deps-arm64.err" 2>/dev/null)
     n=${n:-0}; [ "$n" -eq "$n" ] 2>/dev/null || n=0

@@ -157,6 +157,8 @@ diff <(sed 's/[0-9]\+/N/g' graviton-validation/raw/amd64-build.log) \
 |---|---|---|
 | `imports <pkg>: build constraints exclude all Go files in <dir>` | Shape C, reachable through an import. The chain in the message names the route | Phase 2.2 |
 | `build constraints exclude all Go files in <dir>` with no import chain | Shape C in a package you named explicitly (the Pass 2 sweep) | Phase 2.2 |
+| the same message, but the package's files are **all cgo files** | **not Shape C**: cgo is disabled and every file in the package is a cgo file, so nothing is left. Measured on go1.27.2: a package whose only file carries `import "C"` resolves as `CgoFiles=[main.go] Ignored=[]` with `CGO_ENABLED=1` and emits the Shape C message verbatim with `CGO_ENABLED=0` | Phase 2.1, not 2.2. Disambiguate by re-resolving that one package with `CGO_ENABLED=1 go list <dir>`: if it succeeds, this is a cgo problem |
+| `gcc_arm64.S: Error: no such instruction: 'stp x29,x30,[sp,'` under `# runtime/cgo` | cgo cross-compile with **no `CC`**: the host's x86 gcc is being handed arm64 assembly from `runtime/cgo`. It reads like a Go runtime bug and is not one | set `CC=aarch64-linux-gnu-gcc`, or build natively on arm64 |
 | `unrecognized instruction "MOVQ"` followed by `asm: assembly of <file>.s failed` | an unconstrained `.s` file holding x86 mnemonics, compiled for arm64 (Shape C in disguise, variant 1) | Phase 2.2 |
 | `undefined: <symbol>` for a symbol defined in a `_amd64.go` file | Shape C in disguise: the generic sibling is missing a declaration | Phase 2.2 |
 | `unrecognized command line option '-msse4.2'` | x86-only flag reaching the aarch64 C compiler | Phase 2.1 |

@@ -105,6 +105,27 @@ grep -rn -E '__SSE|__AVX|__x86_64__|__i386__|_mm_|_mm256_' "$dir" --include='*.c
 grep -rn -E '\basm\b.*\(|__asm__' "$dir" --include='*.c' --include='*.h' 2>/dev/null | head
 ```
 
+**Measured, so the method is not theoretical.** `confluent-kafka-go/v2` at v2.0.2,
+v2.1.1, v2.3.0, v2.5.3 and v2.12.0 each bundle the same **seven** archives under
+`kafka/librdkafka_vendor/`:
+
+```
+librdkafka_darwin_amd64.a      librdkafka_glibc_linux_amd64.a   librdkafka_musl_linux_amd64.a
+librdkafka_darwin_arm64.a      librdkafka_glibc_linux_arm64.a   librdkafka_musl_linux_arm64.a
+librdkafka_windows.a
+```
+
+Three things that listing says out loud:
+
+1. **No arm64 version floor exists in the v2 line** - every version tested has it. An
+   upgrade "for arm64 support" on this module would therefore be scope creep, and the
+   correct verdict is `BUNDLED-OK`. This is precisely why no version floors are asserted
+   anywhere in this skill: the check costs seconds, and a recalled floor would have been
+   wrong here.
+2. The archive name encodes the **C library** as well as the architecture, so the
+   glibc-vs-musl row in Phase 1.1's table is a real selection and not a footnote.
+3. It built and ran on a `c7g.2xlarge`: `librdkafka=0x20c00ff (2.12.0)`.
+
 Three outcomes:
 
 - **no hits** → PASS. The library is portable C and builds on aarch64
@@ -196,7 +217,17 @@ Three outcomes:
   ```bash
   grep -rn -E '^//[[:space:]]*(go:build|\+build).*(dynamic|system)' "$dir" --include='*.go' | head
   ```
-  A dynamic tag is a user decision: it moves the library out of the binary and into the deployment image, which changes how the service is packaged
+  A dynamic tag is a user decision: it moves the library out of the binary and into the deployment image, which changes how the service is packaged. **Measured** - on a c7g.2xlarge with librdkafka not installed, `go build -tags dynamic` fails with:
+
+  ```
+  # github.com/confluentinc/confluent-kafka-go/v2/kafka
+  # [pkg-config --cflags  -- rdkafka]
+  Package rdkafka was not found in the pkg-config search path.
+  Package 'rdkafka', required by 'virtual:world', not found
+  ```
+
+  That error IS the conversion: the module stopped carrying its own library and now asks
+  the system for one, which is Route 2's problem with Route 2's fix
 
 A bundled archive also carries a **C library** and a **glibc version**, not just an architecture. An archive named `_glibc_` will not load on alpine; one built against a newer glibc than the runtime image provides will not load there either. Grade it against the libc table in Phase 1.1.
 
@@ -219,6 +250,19 @@ Then make the download architecture-aware (Phase 2.3). Two naming vocabularies c
 | Go (`GOARCH`), Docker (`TARGETARCH`), most release assets | `amd64` | `arm64` |
 | `uname -m` | `x86_64` | `aarch64` |
 | Some release assets (notably from C projects) | `x86_64` | `aarch64` |
+| **`protoc`** (protocolbuffers/protobuf releases) | `x86_64` | **`aarch_64`** |
+
+The `protoc` row is measured, not inferred: the v36.2 release publishes
+`protoc-36.2-linux-aarch_64.zip` and `protoc-36.2-linux-x86_64.zip`. Neither `arm64` nor
+`aarch64` appears, and `protoc` is one of the most commonly fetched tools in a Go
+repository. A third vocabulary is why the rule is to **list the assets** rather than
+construct the name:
+
+```bash
+curl -fsS "https://api.github.com/repos/protocolbuffers/protobuf/releases/tags/v36.2" \
+  | python3 -c 'import json,sys; [print(a["name"]) for a in json.load(sys.stdin)["assets"]]' \
+  | grep -i linux
+```
 
 So a script that does `ARCH=$(uname -m)` and interpolates it into a URL expecting `amd64`/`arm64` is broken on **both** architectures; one that hardcodes `amd64` is broken only on arm64 and therefore survived until now. Always map explicitly, with a failing default branch.
 
@@ -253,6 +297,12 @@ Two modules worth a note for their pure-Go alternatives, offered as a user decis
 
 Pure Go cross-compiles with nothing but environment variables. cgo needs a cross C toolchain, and the setup is per target libc:
 
+**The cross toolchain is not available everywhere.** Measured: `dnf install
+gcc-aarch64-linux-gnu` finds no such package on Amazon Linux 2023, so an AL2023 build
+host cannot cross-compile cgo without building a toolchain first. On a Debian or Ubuntu
+host it is one package. That asymmetry is a concrete reason to prefer a native arm64
+builder, below.
+
 ```bash
 # Debian/Ubuntu build host, targeting linux/arm64 glibc
 sudo apt-get install -y gcc-aarch64-linux-gnu g++-aarch64-linux-gnu
@@ -263,6 +313,18 @@ CGO_ENABLED=1 GOOS=linux GOARCH=arm64 \
 
 file -b app-arm64     # expect: ELF 64-bit LSB ... ARM aarch64
 ```
+
+Without `CC`, the failure is loud but misleading. Measured on an x86 host:
+
+```
+# runtime/cgo
+gcc_arm64.S: Assembler messages:
+gcc_arm64.S:30: Error: no such instruction: `stp x29,x30,[sp,'
+gcc_arm64.S:34: Error: operand size mismatch for `mov'
+```
+
+The host's x86 gcc was handed arm64 assembly from `runtime/cgo`. It reads like a Go
+runtime bug; it is a missing cross-compiler.
 
 This works only when **every** C library the build links is also available as an aarch64 build on the build host — headers and libraries both, under the cross sysroot. For one vendored C library that is easy; for three system libraries it is usually more work than provisioning an arm64 builder.
 
@@ -328,5 +390,7 @@ Each of these has produced a wrong answer in practice:
 | "`file` says it is an ar archive, so it is fine" | `.a` files report no architecture | extract a member and run `file` on it |
 | "The arm64 build succeeded, so cgo is fine" | it succeeded on the build host; the runtime image may have a different libc or glibc version | `ldd` on the binary inside the runtime image (Phase 3.4) |
 | "`CGO_ENABLED=0` fixed it" | it changed the program's resolver and user-lookup behavior and disabled `-race` | confirm the deployment's own `CGO_ENABLED`; if it is `1`, this is not a fix |
+| "`build constraints exclude all Go files` means Shape C" | **measured**: a package whose files are ALL cgo files emits that exact message under `CGO_ENABLED=0`. With `CGO_ENABLED=1` the same package reports `CgoFiles=[main.go] Ignored=[]` | re-resolve that one package with `CGO_ENABLED=1 go list <dir>`. If it succeeds, the fix is Phase 2.1, not 2.2 |
+| "cgo files land in `IgnoredGoFiles` when cgo is off, so that is the guard" | **measured**: true only for a MIXED package (`GoFiles=[plain.go] CgoFiles=[] Ignored=[only_cgo.go]`). A package with no non-cgo file does not resolve at all | use both signals: `IgnoredGoFiles` for mixed packages, the resolution error for pure-cgo ones |
 | "The image is arm64, so the binary is" | `--platform` sets the image's declared architecture; `GOARCH` sets the binary's | `file` on the binary extracted from the image (Phase 3.3) |
 | "No arm64 package, so this is a blocker" | a source build may be entirely viable, and often is for a small C library | try the source build before escalating to a user decision |

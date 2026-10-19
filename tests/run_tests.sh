@@ -99,6 +99,13 @@ assert_has "Shape A recognized" "$OUT" 'OK.*Shape A.*internal/hash'
 assert_has "stub fallback reported" "$OUT" 'FINDING.*panic rather than implement'
 # race gate
 assert_has "missing -race reported" "$OUT" "FINDING.*no 'go test -race' anywhere"
+# pure-cgo package must NOT be called Shape C (only visible with a toolchain)
+if grep -q 'OK  *resolved [0-9]* packages' "$OUT"; then
+  assert_has   "pure-cgo package distinguished from Shape C" "$OUT" 'resolve ONLY with cgo enabled'
+  assert_lacks "pure-cgo package not labelled Shape C"       "$OUT" 'Shape C.*purecgo'
+else
+  echo "  SKIP  no Go toolchain - the cgo-off disambiguation needs one"
+fi
 
 echo
 echo "=== 4. go_arch_scan on the clean fixture ==="
