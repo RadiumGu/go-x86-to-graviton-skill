@@ -85,8 +85,9 @@ echo "logs:      $RAW/"
 if [ $NATIVE_ARM64 -eq 1 ]; then
   echo "capability: native arm64 - build, vet, test and race are all measurable here"
 else
-  echo "capability: NOT arm64 - the cross-build and the RACE DETECTOR are measurable here."
-  echo "            Criteria 2, 5, 8 and 13 will be reported NOT RUN; re-run on Graviton,"
+  echo "capability: NOT arm64 - the cross-build, GO VET and the RACE DETECTOR are all"
+  echo "            measurable here (vet is static; the detector is instrumentation)."
+  echo "            Criteria 2, 8 and 13 will be reported NOT RUN; re-run on Graviton,"
   echo "            Apple Silicon or an arm64 CI runner to satisfy them."
   echo "            The race check DOES run here and counts: the detector is"
   echo "            happens-before instrumentation, not a hardware probe (measured - the"
@@ -146,21 +147,19 @@ else
 fi
 
 # ------------------------------------------------------ 5. go vet diff
-if [ $NATIVE_ARM64 -eq 1 ]; then
-  # shellcheck disable=SC2086
-  CGO_ENABLED="$CGO" GOOS=linux GOARCH=arm64 go vet $TAGFLAG ./... >"$RAW/arm64-vet.log" 2>&1
-  # go vet is static analysis, so GOARCH=amd64 IS a valid baseline here: it analyses
-  # the amd64 build without executing anything. This is the one baseline that does not
-  # need an x86 host.
-  # shellcheck disable=SC2086
-  CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go vet $TAGFLAG ./... >"$RAW/amd64-vet.log" 2>&1
-  if diff -q "$RAW/amd64-vet.log" "$RAW/arm64-vet.log" >/dev/null 2>&1; then
-    pass "5  go vet: no arm64-only findings" "identical to the x86 baseline"
-  else
-    fail "5  go vet: arm64-only findings" "diff $RAW/amd64-vet.log $RAW/arm64-vet.log"
-  fi
+# `go vet` is STATIC analysis: GOOS=linux GOARCH=arm64 go vet analyses the arm64 build
+# without executing a single instruction, so it runs on any host and criterion 5 does
+# not need arm64 hardware. An earlier version gated this on the host architecture and
+# reported NOT RUN on x86 - the same "skipped something that can run" defect as the
+# race check. Both baselines are static too, so the whole comparison is portable.
+# shellcheck disable=SC2086
+CGO_ENABLED="$CGO" GOOS=linux GOARCH=arm64 go vet $TAGFLAG ./... >"$RAW/arm64-vet.log" 2>&1
+# shellcheck disable=SC2086
+CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go vet $TAGFLAG ./... >"$RAW/amd64-vet.log" 2>&1
+if diff -q "$RAW/amd64-vet.log" "$RAW/arm64-vet.log" >/dev/null 2>&1; then
+  pass "5  go vet (arm64 target vs amd64 baseline, both static)" "no arm64-only findings"
 else
-  notrun "5  go vet diff" "host is $HOSTARCH"
+  fail "5  go vet: arm64-only findings" "diff $RAW/amd64-vet.log $RAW/arm64-vet.log"
 fi
 
 # --------------------------------------------------- 8. go test (criterion 8)

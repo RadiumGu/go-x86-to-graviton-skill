@@ -30,6 +30,8 @@ The rule that governs this phase: **name the environment every result came from.
 
 Two limits to state in the report rather than work around:
 
+**`go vet` needs no arm64 host.** `GOOS=linux GOARCH=arm64 go vet ./...` is static analysis: it analyses the arm64 build without executing an instruction, so criterion 5 and its amd64 baseline both run anywhere. Treating vet as arm64-only is the same mistake as treating the race detector that way.
+
 **Cross-compilation executes nothing.** `GOOS=linux GOARCH=arm64 go build ./...` succeeding is a real and important result — for a pure-Go project it retires most of the build risk in one command — but it satisfies exit criterion 1 and no other. Do not let it stand in for criteria 2, 5, 8-13.
 
 **Emulation IS acceptable for the race detector - this corrects an earlier version of this skill.** The detector is happens-before instrumentation, not a hardware probe. Measured on the same realistic bug (a lazily-warmed cache published through a plain `bool`): plain `go test` passed on both a `c7g.2xlarge` and a `c7i.2xlarge`, and `go test -race` reported **3 data races on both**. So run `-race` wherever you can run it - arm64, x86, or an emulated container - and treat a report from any of them as the same blocking defect.
