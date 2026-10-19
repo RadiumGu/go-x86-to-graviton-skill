@@ -50,6 +50,35 @@ command -v go >/dev/null 2>&1 && HAVE_GO=1
 HAVE_FILE=0
 command -v file >/dev/null 2>&1 && HAVE_FILE=1
 
+# Go's own GOOS and GOARCH value lists. A filename suffix drawn from either list IS a
+# build constraint, with no marker inside the file - so these drive every "is this file
+# constrained" decision below. Omitting the GOOS list is how `futimens_darwin.s` and
+# `bpxsvc_zos.s` get reported as unconstrained when the filename already constrains them.
+GOOS_RE='aix|android|darwin|dragonfly|freebsd|hurd|illumos|ios|js|linux|nacl|netbsd|openbsd|plan9|solaris|wasip1|windows|zos'
+NON_LINUX_GOOS_RE='aix|android|darwin|dragonfly|freebsd|hurd|illumos|ios|js|nacl|netbsd|openbsd|plan9|solaris|wasip1|windows|zos'
+GOARCH_RE='386|amd64|amd64p32|arm|arm64|arm64be|armbe|loong64|mips|mips64|mips64le|mips64p32|mips64p32le|mipsle|mipsx|mips64x|ppc|ppc64|ppc64le|ppc64x|riscv|riscv64|s390|s390x|sparc|sparc64|wasm'
+
+# has_build_constraint FILE - true when the file carries a //go:build or // +build line.
+#
+# The constraint may appear ANYWHERE in the leading comment block, not just at the top:
+# measured on containerd's vendor tree, github.com/petermattis/goid/goid_go1.4.s carries
+# it at line 8 and goid_go1.5.s at line 18, both behind a license header. A `head -5`
+# check reports both as unconstrained, which is a false FINDING on correct code.
+# Scan until the first line that is neither blank nor a comment, capped at 200 lines.
+has_build_constraint() {
+  awk '
+    /^[[:space:]]*\/\/[[:space:]]*(go:build|\+build)/ { found=1; exit }
+    /^[[:space:]]*$/                                 { next }
+    /^[[:space:]]*\/\//                              { next }
+    /^[[:space:]]*\/\*/                              { inblock=1; next }
+    inblock && /\*\//                                { inblock=0; next }
+    inblock                                          { next }
+    { exit }                 # first real line of code: no constraint before it
+    NR > 200                 { exit }
+    END { exit !found }
+  ' "$1" 2>/dev/null
+}
+
 note "go_arch_scan - $(pwd)"
 note "toolchain: $([ $HAVE_GO -eq 1 ] && go version 2>/dev/null || echo 'go NOT FOUND - grep-only mode, all verdicts CHECK')"
 
@@ -68,53 +97,76 @@ if [ $HAVE_GO -eq 1 ]; then
   CGO_ENABLED=1 GOOS=linux GOARCH=amd64 go list -deps -json ./... \
     >"$TMP/deps-amd64.json" 2>"$TMP/deps-amd64.err"
 
-  # Pass 1: Shape C reachable through an import - blocks the build today.
-  n=$(grep -c 'build constraints exclude all Go files' "$TMP/deps-arm64.err" 2>/dev/null)
-  n=${n:-0}; [ "$n" -eq "$n" ] 2>/dev/null || n=0
-  if [ "${n:-0}" -gt 0 ]; then
-    grep 'build constraints exclude all Go files' "$TMP/deps-arm64.err" \
-      | sed 's/^/FINDING  Shape C (reachable, blocks the build): /'
-    FINDINGS=$((FINDINGS+n))
-  else
-    ok "no reachable Shape C package (go list -deps for arm64)"
-  fi
-
-  # Pass 2: every directory named explicitly. Measured: ./... silently skips a package
-  # nothing imports, in go list, go build AND go vet - so Pass 1 alone misses latent blockers.
-  : >"$TMP/sweep-arm64.err"; : >"$TMP/sweep-amd64.err"
-  find . -name '*.go' -not -path './.git/*' 2>/dev/null | sed 's|/[^/]*$||' | sort -u \
-    | while read -r d; do
-        CGO_ENABLED=1 GOOS=linux GOARCH=arm64 go list "$d" >/dev/null 2>>"$TMP/sweep-arm64.err"
-        CGO_ENABLED=1 GOOS=linux GOARCH=amd64 go list "$d" >/dev/null 2>>"$TMP/sweep-amd64.err"
-      done
-  grep 'build constraints exclude all Go files' "$TMP/sweep-arm64.err" 2>/dev/null \
-    | sed 's|.*exclude all Go files in ||' | sort -u >"$TMP/sweep-arm64.dirs"
-  grep 'build constraints exclude all Go files' "$TMP/sweep-amd64.err" 2>/dev/null \
-    | sed 's|.*exclude all Go files in ||' | sort -u >"$TMP/sweep-amd64.dirs"
-  comm -23 "$TMP/sweep-arm64.dirs" "$TMP/sweep-amd64.dirs" >"$TMP/sweep-only.dirs" 2>/dev/null
-  ns=$(wc -l <"$TMP/sweep-only.dirs" | tr -d ' ')
-  if [ "${ns:-0}" -gt 0 ]; then
-    sed 's|^|FINDING  Shape C (arm64-only exclusion; latent until imported): |' "$TMP/sweep-only.dirs"
-    FINDINGS=$((FINDINGS+ns))
-  else
-    ok "per-directory sweep: no arm64-only package exclusions"
-  fi
-
-  # Any other arm64-only resolution error
-  if [ -s "$TMP/deps-arm64.err" ] && [ ! -s "$TMP/deps-amd64.err" ]; then
-    check "arm64 resolution produced errors that amd64 did not; read them:"
-    sed 's/^/           /' "$TMP/deps-arm64.err" | head -10
-  elif [ -s "$TMP/deps-arm64.err" ] && [ -s "$TMP/deps-amd64.err" ]; then
-    note "         (both architectures report resolution errors - likely INFRA, not arm64)"
-  fi
-
+  # STEP 1 - did the capture actually succeed? Nothing below may claim a verdict until
+  # this is answered. A failed capture produces an empty .json and an .err full of
+  # environment complaints, and reading "no findings" out of that is how an empty
+  # result becomes a false all-clear.
   npkg=$(grep -c '"ImportPath"' "$TMP/deps-arm64.json" 2>/dev/null)
   npkg=${npkg:-0}; [ "$npkg" -eq "$npkg" ] 2>/dev/null || npkg=0
+
   if [ "$npkg" -eq 0 ]; then
-    check "go list resolved 0 packages - resolution failed. Every verdict below is CHECK."
+    check "go list resolved 0 packages - RESOLUTION FAILED. No Shape C verdict is possible;"
+    note  "           every verdict below is CHECK, including the ones that print OK."
+    # Name the cause rather than leaving the user to guess. These are the four that
+    # actually happen, and three of them are environment rather than code.
+    if grep -qE 'GOCACHE is not defined|neither \$XDG_CACHE_HOME nor \$HOME|module cache not found|neither GOMODCACHE nor GOPATH' "$TMP/deps-arm64.err" 2>/dev/null; then
+      note "           cause: no HOME/GOCACHE/GOMODCACHE in this environment (common under"
+      note "                  CI runners, sudo, SSM Run Command and container entrypoints)."
+      note "           fix:   export HOME=/root GOCACHE=\$HOME/.cache/go-build GOMODCACHE=\$HOME/go/pkg/mod"
+    elif grep -qE 'missing go.sum entry|no required module provides|module .* found .* but does not contain' "$TMP/deps-arm64.err" 2>/dev/null; then
+      note "           cause: dependencies not downloaded."
+      note "           fix:   go mod download   (or use the committed vendor/ with -mod=vendor)"
+    elif grep -qE 'dial tcp|i/o timeout|proxy.golang.org|certificate|410 Gone' "$TMP/deps-arm64.err" 2>/dev/null; then
+      note "           cause: the module proxy is unreachable."
+      note "           fix:   provide proxy access, or scan a checkout that has vendor/"
+    elif grep -qE 'unrecognized import path|terminal prompts disabled|authentication required' "$TMP/deps-arm64.err" 2>/dev/null; then
+      note "           cause: a private module cannot be resolved."
+      note "           fix:   set GOPRIVATE and the host's credentials, or scan with vendor/"
+    fi
+    note "           raw stderr (first 6 lines):"
+    sed 's/^/             /' "$TMP/deps-arm64.err" 2>/dev/null | head -6
     HAVE_GO=0
   else
     ok "resolved $npkg packages for linux/arm64"
+
+    # STEP 2 - Shape C reachable through an import: blocks the build today.
+    n=$(grep -c 'build constraints exclude all Go files' "$TMP/deps-arm64.err" 2>/dev/null)
+    n=${n:-0}; [ "$n" -eq "$n" ] 2>/dev/null || n=0
+    if [ "$n" -gt 0 ]; then
+      grep 'build constraints exclude all Go files' "$TMP/deps-arm64.err" \
+        | sed 's/^/FINDING  Shape C (reachable, blocks the build): /'
+      FINDINGS=$((FINDINGS+n))
+    else
+      ok "no reachable Shape C package (go list -deps for arm64)"
+    fi
+
+    # STEP 3 - every directory named explicitly. Measured: ./... silently skips a package
+    # nothing imports, in go list, go build AND go vet - so step 2 alone misses latent blockers.
+    : >"$TMP/sweep-arm64.err"; : >"$TMP/sweep-amd64.err"
+    find . -name '*.go' -not -path './.git/*' 2>/dev/null | sed 's|/[^/]*$||' | sort -u \
+      | while read -r d; do
+          CGO_ENABLED=1 GOOS=linux GOARCH=arm64 go list "$d" >/dev/null 2>>"$TMP/sweep-arm64.err"
+          CGO_ENABLED=1 GOOS=linux GOARCH=amd64 go list "$d" >/dev/null 2>>"$TMP/sweep-amd64.err"
+        done
+    grep 'build constraints exclude all Go files' "$TMP/sweep-arm64.err" 2>/dev/null \
+      | sed 's|.*exclude all Go files in ||' | sort -u >"$TMP/sweep-arm64.dirs"
+    grep 'build constraints exclude all Go files' "$TMP/sweep-amd64.err" 2>/dev/null \
+      | sed 's|.*exclude all Go files in ||' | sort -u >"$TMP/sweep-amd64.dirs"
+    comm -23 "$TMP/sweep-arm64.dirs" "$TMP/sweep-amd64.dirs" 2>/dev/null \
+      | grep -vE "/($NON_LINUX_GOOS_RE)(/|$)" >"$TMP/sweep-only.dirs"
+    ns=$(wc -l <"$TMP/sweep-only.dirs" | tr -d ' ')
+    if [ "${ns:-0}" -gt 0 ]; then
+      sed 's|^|FINDING  Shape C (arm64-only exclusion; latent until imported): |' "$TMP/sweep-only.dirs"
+      FINDINGS=$((FINDINGS+ns))
+    else
+      ok "per-directory sweep: no arm64-only package exclusions"
+    fi
+
+    # Any other arm64-only resolution error
+    if [ -s "$TMP/deps-arm64.err" ] && [ ! -s "$TMP/deps-amd64.err" ]; then
+      check "arm64 resolution produced errors that amd64 did not; read them:"
+      sed 's/^/           /' "$TMP/deps-arm64.err" | head -10
+    fi
   fi
 else
   check "no Go toolchain: resolution and Shape C detection not verified"
@@ -186,27 +238,58 @@ fi
 # ------------------------------------------------------- 3. build constraints
 head2 "3. Build constraints and assembly (vendor/ included deliberately)"
 
+# A file whose suffix names a NON-LINUX GOOS is constrained away from this target
+# entirely, so it is not an arm64 question: vendor trees are full of _darwin, _windows,
+# _plan9 and _zos files and reporting them is pure noise. The same applies to a package
+# that lives under a non-linux GOOS directory (golang.org/x/sys/plan9) or under a
+# directory named for another architecture (wazero's .../isa/amd64 backend package,
+# whose arm64 counterpart is a sibling package, not a sibling file).
+irrelevant_path() {
+  printf '%s\n' "$1" | grep -qE "/($NON_LINUX_GOOS_RE)/" && return 0
+  printf '%s\n' "$1" | grep -qE "_($NON_LINUX_GOOS_RE)(_($GOARCH_RE))?\.(go|s)$" && return 0
+  return 1
+}
+
 find . -type d -name .git -prune -o -type f \
   \( -name '*_amd64*.go' -o -name '*_amd64*.s' -o -name '*_386*.go' -o -name '*_386*.s' \) \
-  -print 2>/dev/null | sort >"$TMP/amd64files.txt"
+  -print 2>/dev/null | sort >"$TMP/amd64files.raw"
+: >"$TMP/amd64files.txt"
+while read -r f; do
+  [ -n "$f" ] || continue
+  irrelevant_path "$f" || printf '%s\n' "$f" >>"$TMP/amd64files.txt"
+done <"$TMP/amd64files.raw"
+nskip=$(( $(wc -l <"$TMP/amd64files.raw" | tr -d ' ') - $(wc -l <"$TMP/amd64files.txt" | tr -d ' ') ))
+
 find . -type d -name .git -prune -o -type f \
   \( -name '*_arm64*.go' -o -name '*_arm64*.s' \) -print 2>/dev/null | sort >"$TMP/arm64files.txt"
 
 na=$(wc -l <"$TMP/amd64files.txt" | tr -d ' ')
 nr=$(wc -l <"$TMP/arm64files.txt" | tr -d ' ')
-note "         amd64/386-suffixed files: $na    arm64-suffixed files: $nr"
+note "         amd64/386-suffixed files: $na    arm64-suffixed files: $nr    (skipped $nskip non-linux-GOOS files)"
 
 # Per-directory shape, using the suffix families
 if [ "$na" -gt 0 ]; then
-  sed 's|/[^/]*$||' "$TMP/amd64files.txt" | sort -u >"$TMP/amd64dirs.txt"
+  sed 's|/[^/]*$||' "$TMP/amd64files.txt" | sort -u >"$TMP/amd64dirs.raw"
+  : >"$TMP/amd64dirs.txt"
+  while read -r d; do
+    [ -n "$d" ] || continue
+    # A package directory literally named for another architecture is that
+    # architecture's implementation package; its arm64 peer is a sibling DIRECTORY.
+    base=$(basename "$d")
+    printf '%s\n' "$base" | grep -qE "^($GOARCH_RE)$" && {
+      printf 'OK       arch-specific package dir (peer lives beside it, not inside): %s\n' "$d"
+      continue
+    }
+    printf '%s\n' "$d" >>"$TMP/amd64dirs.txt"
+  done <"$TMP/amd64dirs.raw"
+
   while read -r d; do
     [ -n "$d" ] || continue
     has_arm64=0; has_fallback=0
     ls "$d" 2>/dev/null | grep -q 'arm64' && has_arm64=1
     # A fallback is a file in the same directory gated on !amd64, or named generic/purego/noasm
-    ls "$d" 2>/dev/null | grep -qE '_(generic|purego|noasm|portable)[^.]*\.(go|s)$' && has_fallback=1
+    ls "$d" 2>/dev/null | grep -qE '_(generic|purego|noasm|portable|other|fallback)[^.]*\.(go|s)$' && has_fallback=1
     grep -lsE '^//[[:space:]]*(go:build|\+build)[^\n]*!amd64' "$d"/*.go >/dev/null 2>&1 && has_fallback=1
-    # A file with no architecture suffix at all can also be the portable path
     if [ $has_arm64 -eq 1 ]; then
       printf 'OK       Shape A (ported): %s\n' "$d"
     elif [ $has_fallback -eq 1 ]; then
@@ -223,15 +306,19 @@ fi
 # Files constrained to 32-bit arm with no arm64 sibling: looks ported, is not
 find . -type d -name .git -prune -o -type f \( -name '*_arm.go' -o -name '*_arm.s' \) -print 2>/dev/null \
   | while read -r f; do
+      irrelevant_path "$f" && continue
       d=$(dirname "$f")
       ls "$d" 2>/dev/null | grep -q 'arm64' || printf 'CHECK    32-bit arm only (GOARCH=arm != arm64): %s\n' "$f"
     done
 
-# Unconstrained .s files: compiled for EVERY architecture
+# Unconstrained .s files: compiled for EVERY architecture.
+# The filename filter must cover GOOS suffixes as well as GOARCH ones, and the
+# in-file check must scan the whole leading comment block (see has_build_constraint).
 find . -type d -name .git -prune -o -name '*.s' -print 2>/dev/null \
-  | grep -vE '_(amd64|arm64|arm|386|ppc64|ppc64le|s390x|riscv64|mips|mips64|mipsle|loong64|wasm)[^/]*\.s$' \
+  | grep -vE "_($GOARCH_RE)[^/]*\.s$" \
+  | grep -vE "_($GOOS_RE)([^/]*)?\.s$" \
   | while read -r f; do
-      head -5 "$f" 2>/dev/null | grep -qE '^//[[:space:]]*(go:build|\+build)' \
+      has_build_constraint "$f" \
         || printf 'FINDING  unconstrained .s file - compiled for every architecture: %s\n' "$f"
     done >"$TMP/unconstrained.txt"
 if [ -s "$TMP/unconstrained.txt" ]; then
@@ -241,11 +328,25 @@ else
   ok "no unconstrained .s files"
 fi
 
-# A fallback that is not an implementation
-if grep -rqn --include='*.go' -iE 'panic\("(unsupported|not implemented|no asm)' . 2>/dev/null; then
-  finding "fallback paths that panic rather than implement:"
-  grep -rn --include='*.go' -iE 'panic\("(unsupported|not implemented|no asm)' . 2>/dev/null \
-    | sed 's/^/           /' | head -10
+# A fallback that is not an implementation.
+# Narrow deliberately: `panic("not implemented")` and `panic("Unsupported int size")`
+# occur all over any large vendor tree (go-cmp option stubs, json-iterator, go-winio's
+# ETW field encoder) and have nothing to do with architecture. Only report a panic whose
+# message names a platform or architecture, OR one inside an architecture-constrained file.
+ARCH_PANIC='panic\(("|`)[^"`]*(unsupported|not implemented|no asm|no assembly)[^"`]*(platform|architecture|arch|GOARCH|amd64|arm64|386|cpu)'
+ARCH_PANIC2='panic\(("|`)[^"`]*(platform|architecture|GOARCH)[^"`]*(unsupported|not supported|not implemented)'
+: >"$TMP/panics.txt"
+grep -rnEi --include='*.go' "$ARCH_PANIC|$ARCH_PANIC2" . 2>/dev/null >>"$TMP/panics.txt"
+# Plus any generic "not implemented" panic that sits in a file the architecture gates.
+while read -r f; do
+  [ -n "$f" ] || continue
+  grep -nEi 'panic\(("|`)[^"`]*(unsupported|not implemented)' "$f" 2>/dev/null \
+    | sed "s|^|$f:|" >>"$TMP/panics.txt"
+done <"$TMP/amd64files.txt"
+sort -u "$TMP/panics.txt" -o "$TMP/panics.txt" 2>/dev/null
+if [ -s "$TMP/panics.txt" ]; then
+  finding "fallback paths that panic rather than implement (read each one):"
+  sed 's/^/           /' "$TMP/panics.txt" | head -15
 fi
 
 # Test files gated on amd64 leave the portable path untested
