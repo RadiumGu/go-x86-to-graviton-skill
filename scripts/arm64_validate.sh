@@ -152,12 +152,30 @@ fi
 # not need arm64 hardware. An earlier version gated this on the host architecture and
 # reported NOT RUN on x86 - the same "skipped something that can run" defect as the
 # race check. Both baselines are static too, so the whole comparison is portable.
+#
+# BUT static does not mean free of a C toolchain. With CGO_ENABLED=1 on a non-arm64 host
+# and no CC, vet still has to build runtime/cgo for arm64, and the host's x86 gcc is
+# handed arm64 assembly:
+#     # runtime/cgo
+#     gcc_arm64.S:30: Error: no such instruction: `stp x29,x30,[sp,'
+# That filled the arm64 log with assembler errors, made the diff non-empty, and produced
+# a FALSE FAIL on criterion 5. Measured on a c7i.2xlarge against sql-replay.
+VET_CGO="$CGO"
+VET_NOTE=""
+if [ $NATIVE_ARM64 -eq 0 ] && [ "$CGO" = "1" ] && [ -z "${CC:-}" ]; then
+  VET_CGO=0
+  VET_NOTE=" [cross-compiled with cgo OFF: no aarch64 CC on this host, and vet's checks are cgo-independent]"
+fi
 # shellcheck disable=SC2086
-CGO_ENABLED="$CGO" GOOS=linux GOARCH=arm64 go vet $TAGFLAG ./... >"$RAW/arm64-vet.log" 2>&1
+CGO_ENABLED="$VET_CGO" GOOS=linux GOARCH=arm64 go vet $TAGFLAG ./... >"$RAW/arm64-vet.log" 2>&1
 # shellcheck disable=SC2086
 CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go vet $TAGFLAG ./... >"$RAW/amd64-vet.log" 2>&1
-if diff -q "$RAW/amd64-vet.log" "$RAW/arm64-vet.log" >/dev/null 2>&1; then
-  pass "5  go vet (arm64 target vs amd64 baseline, both static)" "no arm64-only findings"
+if grep -qE 'gcc_arm64\.S|no such instruction' "$RAW/arm64-vet.log" 2>/dev/null; then
+  notrun "5  go vet (arm64 target)" "the arm64 vet needs a C toolchain here"
+  echo "   $RAW/arm64-vet.log holds the cross-compiler's assembler failing on arm64"
+  echo "   instructions, not vet findings. Set CC=aarch64-linux-gnu-gcc, or run on arm64."
+elif diff -q "$RAW/amd64-vet.log" "$RAW/arm64-vet.log" >/dev/null 2>&1; then
+  pass "5  go vet (arm64 target vs amd64 baseline, both static)" "no arm64-only findings$VET_NOTE"
 else
   fail "5  go vet: arm64-only findings" "diff $RAW/amd64-vet.log $RAW/arm64-vet.log"
 fi
