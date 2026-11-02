@@ -7,7 +7,7 @@
 # project never picks up build output.
 #
 # What it can prove depends entirely on where it runs:
-#   x86 host        -> the cross-build only (exit criterion 1)
+#   x86 host        -> cross-build, vet and race (criteria 1, 5, 9)
 #   arm64 hardware  -> build, vet, test and race (criteria 1,2,5,8,9,10,11)
 # It prints which case applies and refuses to imply more than it measured.
 #
@@ -285,9 +285,9 @@ echo "== Result =="
 echo "failed checks: $FAILED"
 if [ $NATIVE_ARM64 -eq 0 ]; then
   echo
-  echo "This run measured ONE exit criterion. Record every NOT RUN above as NOT RUN in"
-  echo "00-summary.md - not as PASS. A cross-build proves the code is arm64-buildable and"
-  echo "nothing about how it behaves there."
+  echo "This run could measure at most exit criteria 1, 5 and 9. Record every NOT RUN above"
+  echo "as NOT RUN in 00-summary.md - not as PASS. A cross-build proves the code is"
+  echo "arm64-buildable and nothing about how it behaves there."
 fi
 echo
 echo "Startup validation (criterion 12) is not automated here: run the application and"

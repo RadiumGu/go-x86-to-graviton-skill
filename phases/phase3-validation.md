@@ -104,9 +104,9 @@ Do not change `GOMODCACHE` or `GOCACHE` to a temporary directory unless you must
 | Situation | Choose |
 |---|---|
 | Pure Go, and arm64 hardware is available | **native** — it also gives you test and race results |
-| Pure Go, no arm64 hardware | cross-compile for criterion 1; mark 2, 5, 8-13 `NOT RUN` and say why |
+| Pure Go, no arm64 hardware | cross-compile for criterion 1; run 5 and 9 on this host; mark 2, 8, 10-13 `NOT RUN` and say why |
 | cgo, and arm64 hardware is available | **native.** Avoids per-library cross-toolchain setup entirely |
-| cgo, no arm64 hardware | cross-compile with `CC=aarch64-linux-gnu-gcc` for the build check; everything else is `NOT RUN` or emulated-and-qualified |
+| cgo, no arm64 hardware | cross-compile with `CC=aarch64-linux-gnu-gcc` for the build check; run 5 and 9 on this host; everything else is `NOT RUN` or emulated-and-qualified |
 | Container is the deployment artifact | build the image for `linux/arm64` **and** run 3.1/3.2 inside it, so the libc and library versions match production |
 
 ---
@@ -221,7 +221,7 @@ go test -skip 'TestNeedsPostgres|TestNeedsS3' ./... \
 
 A run that skips every test is never the final build. Record each skip and its `INFRA` evidence under CHECK Items.
 
-### Race run (criterion 9) — mandatory, on real arm64 hardware
+### Race run (criterion 9) — mandatory, on every host; on real arm64 hardware as well where available
 
 ```bash
 # Prerequisites: -race needs cgo, and therefore a C compiler. On linux/arm64 it has been
@@ -229,19 +229,20 @@ A run that skips every test is never the final build. Record each skip and its `
 go env CGO_ENABLED
 cc --version 2>/dev/null || gcc --version 2>/dev/null || echo "NO C COMPILER: -race cannot build"
 
-go test -race ./... > graviton-validation/raw/arm64-race.log 2>&1
-echo "race exit=$?" | tee -a graviton-validation/raw/arm64-race.log
+case "$(uname -m)" in aarch64|arm64) RACE_LOG=graviton-validation/raw/arm64-race.log ;; *) RACE_LOG=graviton-validation/raw/amd64-race.log ;; esac
+go test -race ./... > "$RACE_LOG" 2>&1
+echo "race exit=$?" | tee -a "$RACE_LOG"
 
-grep -c 'WARNING: DATA RACE' graviton-validation/raw/arm64-race.log
+grep -c 'WARNING: DATA RACE' "$RACE_LOG"
 ```
 
 For a suite whose races are timing-dependent, repetition finds more than a single pass. Do this when the suite is fast enough:
 
 ```bash
-go test -race -count=5 ./... >> graviton-validation/raw/arm64-race.log 2>&1
+go test -race -count=5 ./... >> "$RACE_LOG" 2>&1
 # Or concentrate on the concurrent packages identified in Phase 1.5
 go test -race -count=20 -run 'TestConcurrent|TestParallel' ./internal/... \
-  >> graviton-validation/raw/arm64-race.log 2>&1
+  >> "$RACE_LOG" 2>&1
 ```
 
 **A `WARNING: DATA RACE` is blocking.** Copy the full report into `07-build-test-results.md` — both goroutine stacks, the read and the write, and the creating stacks. That output is the entire fix; summarizing it loses the information. Label it `ARM64` with a `PRE-EXISTING-ROOT-CAUSE` note: the defect predates the migration, and arm64 is what turns it into an incident.
@@ -251,7 +252,7 @@ Then run the same race command on the x86 baseline and record the result. One of
 - it also races on x86 → the defect was always reachable and no one had run `-race`
 - it races only on arm64 → the weak memory model is what made it observable, which is exactly this skill's thesis and worth stating as the finding it is
 
-If the race run cannot execute at all (no arm64 hardware, no C compiler, `CGO_ENABLED=0` in a way that cannot be changed for a test build), criterion 9 is `NOT RUN`. Write it as `NOT RUN` with the reason, and carry it into `00-summary.md` under Remaining Concerns. Never record `PASS` for a check that did not run.
+If the race run cannot execute at all on any host (no C compiler, `CGO_ENABLED=0` in a way that cannot be changed for a test build), criterion 9 is `NOT RUN`. Write it as `NOT RUN` with the reason, and carry it into `00-summary.md` under Remaining Concerns. Never record `PASS` for a check that did not run.
 
 ### Results that change without failing
 
@@ -387,7 +388,7 @@ curl -fsS localhost:8080/<a-real-endpoint> | head -5
 
 Consolidate into `00-summary.md` using the template in [documentation-standards.md](../document_references/documentation-standards.md). Three rules:
 
-1. **Every exit criterion gets a verdict and the environment it ran in.** `PASS (Graviton c7g.xlarge, Amazon Linux 2023)` and `PASS (cross-compiled on x86)` are different facts, and criteria 2 and 8-13 cannot be satisfied by the second
+1. **Every exit criterion gets a verdict and the environment it ran in.** `PASS (Graviton c7g.xlarge, Amazon Linux 2023)` and `PASS (cross-compiled on x86)` are different facts, and criteria 2, 8 and 10-13 cannot be satisfied by the second (5 and 9 run on any host, by running vet / `-race`, not by a cross-build)
 2. **`NOT RUN` is a valid verdict and is not a failure.** It is a failure to write `PASS` for it
 3. **Lead with the class-4 findings.** A reader skims the summary for "can I ship this"; the build either worked or it did not and that is self-evident from the criteria table, while a race report or a `CGO_ENABLED` behavior change is the thing that needs a human decision
 

@@ -69,7 +69,7 @@ If a `skill-config.md` exists at the project root, read it before Phase 1 and ap
 2. Source code and build scripts available
 3. Current Go version documented (Phase 1.1 records where it was read from: `go.mod` `go`/`toolchain` directives, the Dockerfile builder image, CI setup-go, or `go version`)
 4. Build configuration available: `go.mod`, `go.sum`, `vendor/modules.txt` if vendored, `go.work` if a workspace, plus Makefile, `.goreleaser.yaml`, `BUILD.bazel`, Dockerfiles, CI workflows and deployment descriptors as present
-5. ARM64 build/test environment access (Graviton EC2, Apple Silicon, GitHub `ubuntu-24.04-arm` runner, or an arm64 container). **Pure-Go cross-compilation from x86 proves the build; it does not prove the behavior.** Class-4 findings require real arm64 execution — emulation under QEMU runs the code but reorders memory like the host in some configurations and is not evidence for the race check
+5. ARM64 build/test environment access (Graviton EC2, Apple Silicon, GitHub `ubuntu-24.04-arm` runner, or an arm64 container). **Pure-Go cross-compilation from x86 proves the build; it does not prove the behavior.** Class-4 findings require real arm64 execution. The race *detector* is the exception: it is instrumentation, so `go test -race` counts on x86 and under emulation (exit criterion 9); what only real arm64 hardware shows is arm64's interleaving and the manifestation rate
 6. Complete dependency set resolvable: either network access to the module proxy, a warm module cache, or a committed `vendor/` tree
 7. Existing test suite
 8. Tools the commands call: `git`, `go` (the project's version), `file`, `grep`, `awk`, `curl`, and a container runtime (Phase 1.4 image check and Phase 3 container validation). A C cross-compiler (`gcc-aarch64-linux-gnu`) only if cgo is present and you cross-compile rather than build natively
@@ -94,7 +94,7 @@ ARM64 migration progress:
 - [ ] 2.5 Behavioral fixes: portable branches for CPU gates, named syscalls, os.Getpagesize(), forced float rounding where a test depends on it (05)
 - [ ] 2.6 Runtime recommendations documented, not applied (06)
 - [ ] 3.0-3.1 ARM64 build and `go vet`; failures classified INFRA / ARM64 / PRE-EXISTING (07)
-- [ ] 3.2 `go test` on ARM64, then `go test -race` on ARM64 (the race run is mandatory and its own line) (07)
+- [ ] 3.2 `go test` on ARM64, then `go test -race` on every host available, ARM64 included where available (the race run is mandatory and its own line) (07)
 - [ ] 3.3 Container build and in-image architecture scan (07)
 - [ ] 3.4 Startup on ARM64: runtime.GOARCH, linked libraries, DNS and user lookup, no SIGILL/SIGBUS (07)
 - [ ] 00-summary.md: each exit criterion with where it ran
@@ -140,7 +140,7 @@ Output files produced:
 | `raw/build-constraints.txt` | 1.3 | One line per architecture-constrained file, with its siblings |
 | `raw/native-artifact-scan.txt` | 1.4 | Every committed native file found by content, with its architecture |
 | `raw/image-platforms.txt` | 1.4 | One line per referenced image, with the platforms its registry publishes |
-| `raw/arm64-build.log`, `raw/arm64-test.log`, `raw/arm64-race.log` | 3.1, 3.2 | Verbatim ARM64 build, test and race output |
+| `raw/arm64-build.log`, `raw/arm64-test.log`, `raw/arm64-race.log`, `raw/amd64-race.log` | 3.1, 3.2 | Verbatim ARM64 build and test output; race output per architecture |
 | `00-summary.md` | End | Executive summary and exit criteria |
 
 ### Phase 1: Static Compatibility Analysis
@@ -178,14 +178,14 @@ Build and test on ARM64. See [phases/phase3-validation.md](phases/phase3-validat
 
 ## Exit Criteria
 
-A criterion that runs on ARM64 passes only on a Graviton host or the target itself, such as the arm64 Lambda function; one that ran only under emulation or by cross-compilation is NOT RUN (Phase 3, "What each environment can prove"). Cross-compilation from x86 satisfies criterion 1 and nothing else.
+A criterion that runs on ARM64 passes only on a Graviton host or the target itself, such as the arm64 Lambda function; one that ran only under emulation or by cross-compilation is NOT RUN (Phase 3, "What each environment can prove"). Two criteria do not depend on executing arm64 code and run on any host, emulation included: 5 (`go vet` is static analysis) and 9 (the race detector is instrumentation). Apart from those, cross-compilation from x86 satisfies criterion 1 and nothing else.
 
 ### Must Pass
 1. `GOOS=linux GOARCH=arm64 go build ./...` succeeds
 2. A native build on arm64 succeeds, with `CGO_ENABLED` set as the deployment sets it
 3. Every cgo dependency links against an aarch64 C library, or is documented as a user decision
 4. Every architecture-constrained file has an arm64 or generic path, in the module and in `vendor/`
-5. `go vet ./...` on arm64 reports nothing new against the x86 baseline
+5. `GOOS=linux GOARCH=arm64 go vet ./...` reports nothing new against the x86 baseline (static analysis: runs on any host)
 6. Container images build for `linux/arm64` and contain no x86-64 native files (if containerized)
 7. `go.mod` and `go.sum` unchanged, or every change traced to an arm64 blocker in `02`/`03`
 
@@ -209,7 +209,7 @@ Infrastructure failures (missing database, services, credentials, network or mod
 
 ARM64 failures are blocking. Do not relax a build constraint to make a test pass, do not set `CGO_ENABLED=0` to get past a cgo link error unless the deployment also sets it, and do not drop `-race`; the failing build is the final build.
 
-**Race detector failures are a distinct category and are always blocking.** A data race is a pre-existing defect in the code, not an arm64 defect — but arm64 is where it becomes a production incident, so it blocks this transformation. Classify it `ARM64` with a `PRE-EXISTING-ROOT-CAUSE` note. Record the full detector output in `raw/arm64-race.log`; it names both stacks and is the entire fix.
+**Race detector failures are a distinct category and are always blocking.** A data race is a pre-existing defect in the code, not an arm64 defect — but arm64 is where it becomes a production incident, so it blocks this transformation. Classify it `ARM64` with a `PRE-EXISTING-ROOT-CAUSE` note. Record the full detector output in `raw/arm64-race.log` (`raw/amd64-race.log` when it ran on x86); it names both stacks and is the entire fix.
 
 ## User Responsibility (Post-Transformation)
 
@@ -221,7 +221,7 @@ ARM64 failures are blocking. Do not relax a build constraint to make a test pass
 ## Notes
 
 - **Cross-compiling is not validating.** `GOOS=linux GOARCH=arm64 go build ./...` passing on an x86 laptop is a genuine and valuable signal — for pure Go it is most of the build risk gone — but it executes nothing. Classes 1 (with cgo) and 4 are invisible to it
-- **Emulation is not the race check.** QEMU under `docker run --platform linux/arm64` runs arm64 instructions, but it does not faithfully reproduce arm64's memory ordering: it is useful for build, link, import and startup checks and is not evidence for exit criterion 9. Run `-race` on real Graviton or Apple Silicon
+- **Emulation counts for race detection, not for the manifestation rate.** QEMU under `docker run --platform linux/arm64` does not faithfully reproduce arm64's memory ordering, but the race detector does not depend on it: a race reported there, or on x86, is the same blocking defect (exit criterion 9). What emulation cannot give you is arm64's interleaving coverage or the 22–38% rate; when no real Graviton or Apple Silicon host ran `-race`, record that coverage as NOT RUN, not the race check itself
 - Monorepos and Go workspaces require analysis of every module and every `main` package; a workspace's `go.work` changes which module versions resolve, so capture `go list` from the workspace root as the deployment builds it
 - A vendored project (`vendor/` present) builds from `vendor/` by default (`-mod=vendor` is implied when `vendor/modules.txt` matches `go.mod`). Phase 1.3's constraint scan **must** cover `vendor/` — that is where amd64-only assembly actually lives — and a Phase 2 dependency change requires `go mod vendor` to be re-run and committed
 - Run the bash blocks with bash 3.2 or later. On macOS, where zsh is the default shell ([Apple](https://support.apple.com/en-us/102360)), start them with `bash`; on Windows, run the skill in a WSL 2 distribution ([Microsoft](https://learn.microsoft.com/en-us/windows/wsl/compare-versions)) with the project in the Linux file system

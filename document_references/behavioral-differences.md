@@ -65,19 +65,20 @@ This framing matters operationally. A team that believes Graviton broke their se
 
 ### How to find it
 
-There is no static pattern. The check is the race detector, on real arm64 hardware:
+There is no static pattern. The check is the race detector, on every host you have and on real arm64 hardware as well where available:
 
 ```bash
-go test -race ./... 2>&1 | tee graviton-validation/raw/arm64-race.log
-grep -c 'WARNING: DATA RACE' graviton-validation/raw/arm64-race.log
+case "$(uname -m)" in aarch64|arm64) RACE_LOG=graviton-validation/raw/arm64-race.log ;; *) RACE_LOG=graviton-validation/raw/amd64-race.log ;; esac
+go test -race ./... 2>&1 | tee "$RACE_LOG"
+grep -c 'WARNING: DATA RACE' "$RACE_LOG"
 ```
 
 Repetition finds timing-dependent races a single pass misses:
 
 ```bash
-go test -race -count=10 ./... 2>&1 | tee -a graviton-validation/raw/arm64-race.log
+go test -race -count=10 ./... 2>&1 | tee -a "$RACE_LOG"
 go test -race -count=50 -run 'TestConcurrent|TestParallel|TestRace' ./internal/... 2>&1 \
-  | tee -a graviton-validation/raw/arm64-race.log
+  | tee -a "$RACE_LOG"
 ```
 
 Requirements and limits:

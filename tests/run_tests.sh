@@ -178,6 +178,17 @@ else
   echo "  SKIP  no go and/or C compiler on this host - arm64_validate not exercised"
 fi
 
+echo
+echo "=== 8. docs agree with the measurement: emulation and x86 count for the race check ==="
+# Test 7 pins the validator's OUTPUT. The retracted claim also survived in the documents
+# an agent actually reads: SKILL.md's entry criterion 5 and Notes said the opposite of
+# exit criterion 9 two screens away. Grep every shipped document for the old wording.
+OUT6=$(mktemp)
+grep -rnE 'not evidence for (the race check|exit criterion 9)|[Ee]mulation is not the race check|refuses to satisfy under emulation|模拟不等于竞争检查|不能作为退出条件 9 的证据|拒绝在模拟环境下认为该条件满足|退出条件 9 记 `NOT RUN`|cross-build only \(exit criterion 1\)|measured ONE exit criterion|must be real arm64 hardware|NOT RUN - no arm64 hardware|mandatory, on real arm64 hardware$|on real arm64 hardware \(criterion 9\)' \
+  SKILL.md POWER.md README.md summaries.md docs/*.md phases/*.md document_references/*.md scripts/*.sh examples >"$OUT6" 2>/dev/null
+assert_lacks "no document says emulation is not evidence for criterion 9" "$OUT6" '.'
+rm -f "$OUT6"
+
 rm -f "$OUT" "$OUT2" "$OUT3" "$OUT4"
 echo
 echo "================================"
