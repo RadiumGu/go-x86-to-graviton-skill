@@ -32,6 +32,12 @@ jobs:
         runner: [ubuntu-24.04, ubuntu-24.04-arm, macos-14]
     steps:
       - uses: actions/checkout@v4
+      # The third-party scan below needs `go` on PATH. The Ubuntu images happen to
+      # ship one; macos-14 does not, and without it the scanner correctly prints
+      # "CHECK no Go toolchain" and the `OK resolved N packages` assertion fails.
+      # That made every run of this job on macOS red since the workflow was added.
+      - uses: actions/setup-go@v5
+        with: { go-version: 'stable' }
 
       - name: shellcheck
         if: runner.os == 'Linux'
