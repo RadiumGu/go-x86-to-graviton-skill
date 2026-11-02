@@ -372,7 +372,7 @@ The transformation succeeded when:
 
 1. `GOOS=linux GOARCH=arm64 go build ./...` passes
 2. A native arm64 build passes with the deployment's `CGO_ENABLED`
-3. `go test ./...` and `go test -race ./...` both pass **on real arm64 hardware**, or any failure is classified and any un-run check is recorded as `NOT RUN`
+3. `go test ./...` passes **on real arm64 hardware** and `go test -race ./...` passes on every host it ran on (arm64 included where available), or any failure is classified and any un-run check is recorded as `NOT RUN`
 4. The application starts on arm64 and `runtime.GOARCH` reports `arm64`
 5. **Every change traces to a named finding.** A reviewer reading the diff alongside `graviton-validation/` can account for every line
 6. `go.mod`/`go.sum` are unchanged, or each change cites an arm64 blocker with evidence
@@ -391,6 +391,6 @@ Criterion 5 is the one that distinguishes a usable deliverable from an unreviewa
 | Unsure whether a finding is arm64-specific | Run it on the x86 baseline at the same commit. If it fails there too, it is `PRE-EXISTING` |
 | Unsure whether a fallback implementation is equivalent | Read its body. Do not infer from its name |
 | Unsure whether to substitute a cgo library | Do not. Write it up as a user decision with options and costs |
-| Unsure whether a check ran on real hardware | It did not. Write `NOT RUN` |
+| Unsure whether a check ran on real hardware | It did not. Write `NOT RUN` (except criteria 5 and 9, which count on any host: name the host they ran on) |
 | Unsure whether a change is in scope | Leave it out and list it under "Observed, out of scope" |
-| A race report you cannot fix within scope | `NOT RUN`/`FAIL` on criterion 9, full detector output in the report, and a user decision. Never a sleep |
+| A race report you cannot fix within scope | `FAIL` on criterion 9, full detector output in the report, and a user decision. Never a sleep |

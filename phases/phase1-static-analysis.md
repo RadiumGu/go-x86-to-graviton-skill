@@ -715,7 +715,7 @@ Record:
 | Floor | What it changes on arm64 | If below |
 |---|---|---|
 | Go 1.5 | `linux/arm64` is a supported port | not a realistic finding |
-| Go 1.14 | race detector supported on `linux/arm64` | **blocking for exit criterion 9** — the race check cannot run |
+| Go 1.14 | race detector supported on `linux/arm64` | **blocks the arm64 race run** — criterion 9 still runs on the x86 baseline; record arm64 interleaving coverage `NOT RUN` |
 | Go 1.18 | register-based calling convention on arm64 | measurable throughput left on the table; a recommendation, not a blocker |
 | Go 1.20 | `go test -skip` available (used by Phase 3's INFRA handling) | use a narrowed `-run` pattern instead |
 | Go 1.21 | `toolchain` directive; `GOTOOLCHAIN` auto-switching | version pinning is advisory only |

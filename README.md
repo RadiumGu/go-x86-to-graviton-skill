@@ -27,7 +27,7 @@ What actually breaks, in descending order of how often it blocks a migration:
 
 Class 4 is where Go migrations fail *after* being declared successful. A pure-Go program that cross-compiles in two seconds can deadlock on Graviton and never on x86, because x86-64 is Total Store Order and arm64 is weakly ordered. A program with a data race has undefined behavior on both — but only arm64 reliably shows you.
 
-So `go test -race ./...` **on real arm64 hardware** is the highest-value single check in this skill, it is a mandatory exit criterion, and it has no equivalent in the Java or Python Graviton skills.
+So `go test -race ./...` is the highest-value single check in this skill and a mandatory exit criterion. It detects the same races on x86 as on arm64; real arm64 hardware adds the interleavings where those races become production incidents. It has no equivalent in the Java or Python Graviton skills.
 
 ---
 
@@ -48,7 +48,7 @@ Three phases, each with its own document and its own report file:
 - change base image families, run linters, reformat code, or fix CVEs
 - apply any runtime recommendation, including `GOARM64`
 - replace a working cgo dependency with a pure-Go one on its own authority
-- report a `PASS` for a check that ran only under cross-compilation or emulation
+- report a `PASS` for a check that ran only under cross-compilation or emulation (except `go vet` and the race detector, which do not depend on executing arm64 code)
 
 ---
 
@@ -136,7 +136,7 @@ Migrate this Go service to AWS Graviton using the go-x86-to-graviton skill.
 I have a c7g.xlarge running Amazon Linux 2023 available at graviton-ci for validation.
 ```
 
-Naming the arm64 environment in the first message matters more than anything else you can say: without it, exit criteria 2 and 8–13 come back `NOT RUN` and the migration ships unvalidated.
+Naming the arm64 environment in the first message matters more than anything else you can say: without it, exit criteria 2, 8 and 10–13 come back `NOT RUN` (5 and 9 still run on any host) and the migration ships unvalidated.
 
 The agent writes everything into `graviton-validation/` in your project and commits after each step. Read `graviton-validation/00-summary.md` first.
 
@@ -166,7 +166,7 @@ language:
     arm64_environment: 'c7g.xlarge / Amazon Linux 2023, reachable as graviton-ci via SSH'
 ```
 
-Those four fields change the outcome more than anything else in the file. Configuration steers *how* the transformation runs — it cannot widen scope, cannot change the Go version except through `go.toolchain_bump`, and **cannot waive an exit criterion**, including the arm64 race run.
+Those four fields change the outcome more than anything else in the file. Configuration steers *how* the transformation runs — it cannot widen scope, cannot change the Go version except through `go.toolchain_bump`, and **cannot waive an exit criterion**, including the race run.
 
 Full field reference: [`document_references/skill-configuration.md`](document_references/skill-configuration.md).
 
@@ -202,7 +202,7 @@ Runs cross-build, native build, `go vet` diff, `go test`, `go test -race`, and t
   --build-cmd 'make release'
 ```
 
-It detects whether it is on arm64 hardware and reports every check it cannot measure as `NOT RUN` rather than `PASS` — including the race criterion, which it refuses to satisfy under emulation. On a race report it also runs the x86 baseline, because that comparison is what decides whether the finding is "this project has never run `-race`" or "arm64's weak memory model is what made it observable".
+It detects whether it is on arm64 (it cannot tell QEMU emulation from hardware, so qualify a `docker run --platform linux/arm64` run yourself) and runs `go vet` and the race check on every host, recording the architecture each ran on, because neither depends on executing arm64 code; every other check it cannot measure is `NOT RUN` rather than `PASS`. On a race report it also runs the x86 baseline, because that comparison is what decides whether the finding is "this project has never run `-race`" or "arm64's weak memory model is what made it observable".
 
 ### `scripts/sync_power.sh` — keep the two entry points identical
 
@@ -215,7 +215,7 @@ It detects whether it is on arm64 hardware and reports every check it cannot mea
 ## Tests and CI
 
 ```bash
-bash tests/run_tests.sh      # 31 assertions, no Go toolchain required
+bash tests/run_tests.sh      # 43 assertions, no Go toolchain required (36 without Go: the rest SKIP)
 ./scripts/sync_power.sh      # after editing SKILL.md
 ```
 
@@ -390,7 +390,7 @@ hardcoded `GOARCH: amd64` in CI workflows).
 
 ### Regression tests
 
-[`tests/run_tests.sh`](tests/run_tests.sh), 31 assertions, all passing. Each one pins a
+[`tests/run_tests.sh`](tests/run_tests.sh), 43 assertions, all passing. Each one pins a
 specific output line, and each exists because that defect shipped. Run in CI on
 `ubuntu-24.04`, `ubuntu-24.04-arm` and `macos-14` (the bash 3.2 floor), with shellcheck.
 

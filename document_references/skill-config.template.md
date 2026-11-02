@@ -4,7 +4,7 @@ Copy this file to **`skill-config.md` at your project root** (not into the skill
 
 Field meanings and precedence rules: [skill-configuration.md](skill-configuration.md).
 
-Configuration steers HOW the transformation runs. It cannot widen scope, cannot change the declared Go version except through `toolchain_bump`, and cannot waive an exit criterion — including the arm64 race run.
+Configuration steers HOW the transformation runs. It cannot widen scope, cannot change the declared Go version except through `toolchain_bump`, and cannot waive an exit criterion — including the race run.
 
 ---
 
@@ -63,7 +63,7 @@ language:
     workspace_root: .
 
     # The arm64 host available for validation. This field decides how much of the
-    # skill can actually run: without it, exit criteria 2 and 8-13 are NOT RUN.
+    # skill can actually run: without it, exit criteria 2, 8 and 10-13 are NOT RUN.
     arm64_environment: 'c7g.xlarge / Amazon Linux 2023, reachable as graviton-ci via SSH'
 ```
 

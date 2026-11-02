@@ -18,7 +18,7 @@ Configuration steers HOW, never WHAT:
 
 1. **`agent-scope-boundaries.md` always binds.** No configuration widens scope. There is no field that permits dependency modernization, a security sweep, a refactor, or applying a `06-runtime-configuration.md` recommendation
 2. **The declared Go version does not change** unless `go.toolchain_bump` permits it, and then only when a bump is the *only* route to an arm64 build
-3. **Exit criteria are not configurable.** In particular, `go test -race` on real arm64 hardware (criterion 9) cannot be waived by configuration. A project that cannot run it records `NOT RUN`; it does not get a pass
+3. **Exit criteria are not configurable.** In particular, `go test -race` (criterion 9) cannot be waived by configuration. It runs on any host, emulation included; a project that cannot run it anywhere records `NOT RUN`, and one with no arm64 host records the arm64 interleaving coverage as `NOT RUN`. Neither `NOT RUN` is recorded as a pass
 4. **An observed fact beats a configured one.** If `build.system: make` is configured and no Makefile exists, the detected reality wins and the discrepancy is recorded in `01`
 5. **A configured command is run as given.** If `test.command` fails for a reason unrelated to the architecture, that is `INFRA` and is classified, not worked around by substituting a different command
 
@@ -76,7 +76,7 @@ language: go
 | `toolchain_bump` | `false` | `true` permits a Go version change **only** when it is the sole route to an arm64 build. Any other reason remains out of scope |
 | `vendor_mode` | auto from `vendor/modules.txt` | `true` forces `-mod=vendor` |
 | `workspace_root` | auto from `go.work` | the directory every `go list`/`go build` runs from |
-| `arm64_environment` | none | a description of the arm64 host available, e.g. `c7g.xlarge / AL2023 via SSH`. Recorded in `07`'s environment table; its absence means criteria 2 and 8-13 are likely `NOT RUN` |
+| `arm64_environment` | none | a description of the arm64 host available, e.g. `c7g.xlarge / AL2023 via SSH`. Recorded in `07`'s environment table; its absence means criteria 2, 8 and 10-13 are likely `NOT RUN` (5 and 9 run on any host) |
 
 ## Authoring notes
 

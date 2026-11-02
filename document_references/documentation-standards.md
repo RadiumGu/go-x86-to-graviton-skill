@@ -53,7 +53,7 @@ graviton-validation/
     ├── arm64-build.log / amd64-build.log      Native build output, both architectures
     ├── arm64-vet.log / amd64-vet.log          go vet output, both architectures
     ├── arm64-test.log / amd64-test.log        go test output, both architectures
-    ├── arm64-race.log                         go test -race output - full detector reports
+    ├── arm64-race.log / amd64-race.log        go test -race output per architecture - full detector reports
     ├── arm64-startup.log                      Startup output
     └── arm64-bench.txt / amd64-bench.txt      Optional benchmark comparison
 ```
@@ -93,7 +93,7 @@ The only file most readers will open. Lead with the decision a human has to make
 <One sentence: did this module migrate, and what is the one thing a human must decide?>
 
 Build:  PASS (native, Graviton c7g.xlarge / Amazon Linux 2023)
-Race:   <PASS (N runs) | 1 DATA RACE in internal/cache | NOT RUN - no arm64 hardware>
+Race:   <PASS (N runs, <host arch>) | 1 DATA RACE in internal/cache | NOT RUN - no C compiler>
 cgo:    <none | 2 packages, both resolved | 1 BLOCKER - user decision required>
 Deps:   <go.mod unchanged | 1 change, cited below>
 
@@ -345,7 +345,7 @@ The file that earns this skill its keep. Lead with the race result.
 
 ## Data Races
 Project CI runs `-race`: yes / **no (the risk is unmeasured)**
-Race run environment: <Graviton c7g.xlarge | NOT RUN - reason>
+Race run environment: <host and architecture, e.g. Graviton c7g.xlarge (arm64) / c7i.xlarge (x86_64) | NOT RUN - reason>
 Races observed: N in M runs
 
 ### Race 1: internal/cache
@@ -474,11 +474,11 @@ Before: 1 | After: 1 | Changed: no
 ## Race Detector (criterion 9)
 | | |
 |---|---|
-| Environment | <must be real arm64 hardware, named> |
+| Environment | <any host, named with its architecture; arm64 interleaving coverage NOT RUN if no arm64 host ran it> |
 | Command | `go test -race -count=N ./...` |
 | Runs | N |
 | Races observed | N |
-| Log | `raw/arm64-race.log` |
+| Log | `raw/arm64-race.log` (or `raw/amd64-race.log` on an x86 host) |
 <Full detector output per race. Cross-reference 05.>
 
 ## Results That Changed Without Failing
@@ -527,7 +527,7 @@ Before: 1 | After: 1 | Changed: no
 | `arm64-build.log`, `amd64-build.log` | 3.1 | native build output per architecture, plus exit status |
 | `arm64-vet.log`, `amd64-vet.log` | 3.1 | `go vet` output per architecture |
 | `arm64-test.log`, `amd64-test.log` | 3.2 | `go test` output per architecture |
-| `arm64-race.log` | 3.2 | `go test -race` output, **with every detector report complete** |
+| `arm64-race.log`, `amd64-race.log` | 3.2 | `go test -race` output per architecture, **with every detector report complete** |
 | `arm64-startup.log` | 3.4 | startup output, including the `runtime.GOARCH` check |
 | `arm64-bench.txt`, `amd64-bench.txt` | 3.2 | `go test -bench` output per architecture, if collected |
 
