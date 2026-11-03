@@ -6,6 +6,8 @@ Built to the structure of the official [AWS Graviton Agent Skills](https://aws.g
 
 中文使用说明：[docs/USAGE.zh-CN.md](docs/USAGE.zh-CN.md)
 
+> **Disclaimer:** This is sample code for non-production, demonstration and learning purposes only. It is provided "as is" without warranty of any kind. Review and test it in your own environment before relying on it, and do not use it as-is for production workloads. You are responsible for validating the migration results against your own applications.
+
 ---
 
 ## Why Go needs its own skill rather than a copy of the Java one
@@ -457,9 +459,13 @@ When editing `SKILL.md`, run `./scripts/sync_power.sh` so `POWER.md` cannot drif
 
 ---
 
+## Contributing and security
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for how to contribute, and [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md) for the project code of conduct. To report a potential security issue, follow the instructions in [CONTRIBUTING.md](CONTRIBUTING.md#security-issue-notifications) and do not open a public issue.
+
 ## License
 
-[Apache-2.0](LICENSE). The folder structure and file conventions follow the [AWS Graviton Agent Skills](https://github.com/aws/aws-graviton-getting-started/tree/main/tools/skills) layout; all content here is original.
+[MIT-0](LICENSE). The folder structure and file conventions follow the [AWS Graviton Agent Skills](https://github.com/aws/aws-graviton-getting-started/tree/main/tools/skills) layout; all content here is original.
 
 ## References
 
