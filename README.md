@@ -70,60 +70,39 @@ Kiro reads `POWER.md`.
 
 **Settings** (`Cmd+Shift+J` / `Ctrl+Shift+J`) → **Rules** → **Add Rule** → **Remote Rule (GitHub)**, and paste the same URL.
 
-### Claude Code
+### User-level install (Claude Code, Codex, Goose): clone, then `git pull` to update
+
+The skill directory is a plain clone of this repository, so updating it is one command and `git log` tells you what version you have:
 
 ```bash
 git clone --depth 1 https://github.com/RadiumGu/go-x86-to-graviton-skill.git \
-    /tmp/go-graviton-skill && \
-  mkdir -p ~/.claude/skills/go-x86-to-graviton && \
-  cp -r /tmp/go-graviton-skill/{SKILL.md,POWER.md,summaries.md,phases,document_references,scripts} \
-        ~/.claude/skills/go-x86-to-graviton/ && \
-  rm -rf /tmp/go-graviton-skill
+  ~/.claude/skills/go-x86-to-graviton
+
+# update
+git -C ~/.claude/skills/go-x86-to-graviton pull --ff-only
 ```
 
-### GitHub Copilot / VS Code (project-level)
+Same command for other agents, with their skills directory: `~/.codex/skills/go-x86-to-graviton`, `~/.config/goose/skills/go-x86-to-graviton`.
+
+### Project-level install (`.agents/skills/`, GitHub Copilot, Windsurf, Roo Code): unpack, no nested repository
+
+Do not clone into your project: a git repository inside your repository is an embedded repo that `git add` warns about and that your teammates do not get. Unpack a snapshot instead and commit it like any other file:
 
 ```bash
-git clone --depth 1 https://github.com/RadiumGu/go-x86-to-graviton-skill.git \
-    /tmp/go-graviton-skill && \
-  mkdir -p .github/skills/go-x86-to-graviton && \
-  cp -r /tmp/go-graviton-skill/{SKILL.md,POWER.md,summaries.md,phases,document_references,scripts} \
-        .github/skills/go-x86-to-graviton/ && \
-  rm -rf /tmp/go-graviton-skill
+D=.agents/skills/go-x86-to-graviton     # or .github/skills/..., .windsurf/skills/..., .roo/skills/...
+mkdir -p "$D" && curl -fsSL https://github.com/RadiumGu/go-x86-to-graviton-skill/archive/refs/heads/main.tar.gz \
+  | tar -xz --strip-components=1 --exclude='*/tests' --exclude='*/examples' --exclude='*/.github' -C "$D"
 ```
 
-### OpenAI Codex
+To pin a version, replace `refs/heads/main` with a commit SHA. To update, delete `$D` and run the same command again. `.agents/skills/` is the cross-platform standard path and is read by every Agent Skills-compatible platform.
+
+### Running the helper scripts after installing
+
+The scripts run from wherever the skill was installed:
 
 ```bash
-# ~/.codex/skills/go-x86-to-graviton
+~/.claude/skills/go-x86-to-graviton/scripts/go_arch_scan.sh -h
 ```
-
-### Windsurf
-
-```bash
-# .windsurf/skills/go-x86-to-graviton
-```
-
-### Goose
-
-```bash
-# ~/.config/goose/skills/go-x86-to-graviton
-```
-
-### Any Agent Skills platform (project-level, portable)
-
-```bash
-git clone --depth 1 https://github.com/RadiumGu/go-x86-to-graviton-skill.git \
-    /tmp/go-graviton-skill && \
-  mkdir -p .agents/skills/go-x86-to-graviton && \
-  cp -r /tmp/go-graviton-skill/{SKILL.md,POWER.md,summaries.md,phases,document_references,scripts} \
-        .agents/skills/go-x86-to-graviton/ && \
-  rm -rf /tmp/go-graviton-skill
-```
-
-`.agents/skills/` is the cross-platform standard path and is read by every Agent Skills-compatible platform.
-
-Replace the destination path in the Claude Code block to install for Codex, Windsurf, Goose or Roo Code (`.roo/skills/`); the copy itself is identical.
 
 ---
 
@@ -174,7 +153,7 @@ Full field reference: [`document_references/skill-configuration.md`](document_re
 
 ## Helper scripts
 
-Both are stdlib-and-coreutils only, bash 3.2 compatible, and usable on their own without an agent.
+Both need only bash 3.2+ and POSIX tools (no python), and are usable on their own without an agent. Flags take one or two dashes (`-tags x` or `--tags=x`), and an unknown flag is an error rather than being ignored.
 
 ### `scripts/go_arch_scan.sh` — read-only static scan
 
@@ -182,12 +161,28 @@ Covers the deterministic parts of Phase 1. **Never writes inside the scanned tre
 
 ```bash
 ./scripts/go_arch_scan.sh /path/to/your/go/project
-./scripts/go_arch_scan.sh . > graviton-validation/raw/go-arch-scan.txt
+./scripts/go_arch_scan.sh -tags netgo,osusergo .         # the DEPLOYMENT's build tags
+./scripts/go_arch_scan.sh -o graviton-validation/raw .    # also writes raw/go-arch-scan.txt
+./scripts/go_arch_scan.sh -json . | jq '.summary'         # one JSON document, for CI
 ```
 
-Exit `0` clean, `1` findings, `2` not a Go project. Output lines are prefixed `OK`, `CHECK` or `FINDING`; a `CHECK` is a lead, not a verdict.
+| Flag | Meaning |
+|---|---|
+| `-tags LIST` | build tags as for `go build -tags`. Every tag the tree uses that the scan did not evaluate is named in a CHECK, because a Shape C blocker behind a tag is invisible without it |
+| `-o FILE` | also write the report to FILE (a directory gets `go-arch-scan.txt`, or `.json` with `-json`) |
+| `-json` | the same report as one JSON document: `summary`, `exit_code`, and one item per verdict with its details |
+| `-strict` | advisories fail the scan too |
 
-Without the Go toolchain it degrades to a grep-only mode in which every verdict is `CHECK`. With the toolchain it uses `go list` as the fact base and runs both Shape C detection passes.
+| Level | Meaning | Fails the scan |
+|---|---|---|
+| `FINDING` | arm64 migration work is required | yes (exit 1) |
+| `ADVISORY` | not migration work: a gap in how the project is tested, such as never running `-race` | only with `-strict` |
+| `CHECK` | a lead the scanner cannot decide | no |
+| `OK` | checked and fine, recorded so nobody "fixes" it | no |
+
+Exit `2` is a usage error, a directory that is not a Go project, or a scan that cannot run.
+
+It judges directories the way the go command does: `testdata/` and directories starting with `_` or `.` are never packages, and every `go.mod` in the tree is resolved as its own module (a `go.work` root works, and a module the workspace does not list is resolved with `GOWORK=off`). With the toolchain it uses `go list -e` as the fact base and runs both Shape C detection passes in one batched call per architecture; without it, it degrades to a grep-only mode in which every verdict is `CHECK`.
 
 ### `scripts/arm64_validate.sh` — Phase 3 matrix
 
@@ -199,8 +194,11 @@ Runs cross-build, native build, `go vet` diff, `go test`, `go test -race`, and t
   --tags 'netgo,osusergo' \
   --count 5 \
   --skip 'TestPostgres|TestS3' \
-  --build-cmd 'make release'
+  --build-cmd 'make release' \
+  --out graviton-validation/raw        # the default
 ```
+
+The log directory is inside your project by default. Keep it out of git without touching your `.gitignore` with `echo 'graviton-validation/' >> .git/info/exclude`; the script warns when the directory would show up in `git status`.
 
 It detects whether it is on arm64 (it cannot tell QEMU emulation from hardware, so qualify a `docker run --platform linux/arm64` run yourself) and runs `go vet` and the race check on every host, recording the architecture each ran on, because neither depends on executing arm64 code; every other check it cannot measure is `NOT RUN` rather than `PASS`. On a race report it also runs the x86 baseline, because that comparison is what decides whether the finding is "this project has never run `-race`" or "arm64's weak memory model is what made it observable".
 
@@ -215,13 +213,18 @@ It detects whether it is on arm64 (it cannot tell QEMU emulation from hardware, 
 ## Tests and CI
 
 ```bash
-bash tests/run_tests.sh      # 43 assertions, no Go toolchain required (36 without Go: the rest SKIP)
+bash tests/run_tests.sh      # runs without a Go toolchain too; the go-dependent sections SKIP
 ./scripts/sync_power.sh      # after editing SKILL.md
 ```
 
 `tests/fixtures/broken/` carries one instance of every detectable defect plus two that
 must **not** be reported (a correct `xx-go` Dockerfile, and a `.s` file whose constraint
 sits at line 8). `tests/fixtures/clean/` must come back with zero findings.
+`tests/fixtures/layout/` is laid out like a real repository: amd64-only files under
+`testdata/`, `_scratch/` and `.cache/` that must **not** be reported, a nested module
+with a real Shape C that must be, a Shape C that exists only under `-tags prod`, and a
+`gotestsum -- -race` Makefile. `tests/fixtures/workspace/` is a `go.work` root with no
+`go.mod` of its own, plus a module the workspace does not list.
 `tests/memory-model/` is the litmus test and the race fixture.
 
 [`.github/workflows/skill-ci.yml`](.github/workflows/skill-ci.yml) runs all of it on x86,
@@ -231,11 +234,12 @@ result on both architectures.
 To gate your **own** Go project, copy
 [`examples/ci/graviton-gate.yml`](examples/ci/graviton-gate.yml) into
 `.github/workflows/`. Set `DEPLOY_CGO_ENABLED` and `DEPLOY_BUILD_TAGS` to match your
-deployment, and flip `SCAN_STRICT` to `1` once the repo is clean.
+deployment, and flip `SCAN_STRICT` to `1` once the repo is clean: from then on a new
+FINDING fails the build.
 
 ## Output
 
-The transformation writes into `graviton-validation/` in your project:
+The code changes land as one commit per step on a new branch, `graviton/arm64-migration`. The skill refuses to start on a dirty work tree, never runs `git add -A`, and does not push. The reports go into `graviton-validation/` in your project, which is excluded through `.git/info/exclude` (local, your `.gitignore` is untouched) so it never appears in the migration diff:
 
 | File | Contents |
 |---|---|
@@ -388,9 +392,35 @@ After the fixes, containerd went from 10 findings / 14 checks to **2 findings / 
 checks**, and both remaining findings are real (4 x86-hardcoded download URLs, 3
 hardcoded `GOARCH: amd64` in CI workflows).
 
+### Scanner, reviewed against how Go projects are actually laid out
+
+A second review asked whether the scanner judges a repository the way the go command
+does. It did not. Five constructed cases, each now a fixture, showed two false findings
+(amd64-only files under `testdata/` and `_scratch/`, which the go command never builds)
+and three misses: an imported Shape C package in a nested module was reported `OK`, a
+`go.work` root came back `RESOLUTION FAILED`, and a Shape C that exists only under the
+release build tag was invisible because the scanner had no `-tags`. A
+`gotestsum -- -race` Makefile was reported as never running the race detector, and that
+report counted as a FINDING, so almost any repository exited 1.
+
+After the rewrite (one batched `go list -e` per architecture and module, no python),
+the same three repositories at the same commits give identical FINDING and CHECK lines
+except for one new CHECK each naming the build tags the scan did not evaluate. Time
+measured on an m8g.2xlarge:
+
+| Repository | Before | After |
+|---|---|---|
+| containerd (vendored, 2 modules) | 69.3 s | 4.3 s |
+| minio (6 modules) | 10.6 s | 3.1 s |
+| klauspost/compress | 2.4 s | 1.1 s |
+
+The new run also resolves the nested modules the old one never listed: containerd
+1131 packages in 2 modules (was 1129), minio 1324 in 6 (was 1319).
+
 ### Regression tests
 
-[`tests/run_tests.sh`](tests/run_tests.sh), 43 assertions, all passing. Each one pins a
+[`tests/run_tests.sh`](tests/run_tests.sh), 76 assertions with a Go toolchain and a C
+compiler, all passing (52 without a Go toolchain, where the go-dependent sections SKIP). Each one pins a
 specific output line, and each exists because that defect shipped. Run in CI on
 `ubuntu-24.04`, `ubuntu-24.04-arm` and `macos-14` (the bash 3.2 floor), with shellcheck.
 
@@ -401,7 +431,9 @@ specific output line, and each exists because that defect shipped. Run in CI on
   criterion 6 came back `NOT RUN` on both repositories
 - **startup validation (criterion 12)** on a real service. `payforadoption-go` needs
   DynamoDB, RDS and SSM to start, so it was not run
-- **`go.work` workspaces**. Neither repository uses one
+- **`go.work` workspaces on a real repository**. The scanner's workspace handling is
+  pinned by `tests/fixtures/workspace/` (a `go.work` root with no `go.mod`, plus a module
+  the workspace does not list), but no real-world workspace repository has been scanned
 - the **distro-index queries** for Route 2 (`apt-cache policy ...:arm64` via
   `ports.ubuntu.com`, `dnf --forcearch=aarch64`, `apk policy`). Route 2 itself was
   verified by building and running against a system library; the *availability lookup*

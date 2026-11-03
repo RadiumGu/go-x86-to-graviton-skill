@@ -135,15 +135,18 @@ Everything in 1.2 and 1.3 is derived from these files. Two details decide whethe
 >
 > `go env CGO_ENABLED` is `0` on any host without a C compiler, so a capture that inherits the environment will report a cgo project as pure Go. Phase 1.2's entire inventory then comes back empty and the hardest part of the migration is invisible.
 
+> **Use the deployment's build tags, and capture every module.** A constraint is evaluated against one tag set: a package that is Shape C only under `-tags prod` looks fine to an untagged capture. And `./...` covers one module: a nested `go.mod` is a different module whose packages the parent's `./...` never lists, and at a `go.work` root without a `go.mod`, `./...` fails. Run the capture below from **inside each module root** listed by the "Detect module, workspace and vendor layout" step (a module inside a workspace picks up the `go.work` above it; one that `go.work` does not list needs `GOWORK=off`), and write one set of files per module. `scripts/go_arch_scan.sh -tags "$TAGS"` does all of this.
+
 ```bash
 mkdir -p graviton-validation/raw
+TAGS='netgo,osusergo'     # the DEPLOYMENT's -tags, from skill-config.md build_tags; '' if none
 
 # The resolved set as the deployment builds it today (x86 baseline).
-CGO_ENABLED=1 GOOS=linux GOARCH=amd64 go list -deps -json ./... \
+CGO_ENABLED=1 GOOS=linux GOARCH=amd64 go list -deps -json -tags="$TAGS" ./... \
   > graviton-validation/raw/go-list-deps-amd64.json 2>graviton-validation/raw/go-list-deps-amd64.err
 
 # The same set as it would resolve on Graviton.
-CGO_ENABLED=1 GOOS=linux GOARCH=arm64 go list -deps -json ./... \
+CGO_ENABLED=1 GOOS=linux GOARCH=arm64 go list -deps -json -tags="$TAGS" ./... \
   > graviton-validation/raw/go-list-deps-arm64.json 2>graviton-validation/raw/go-list-deps-arm64.err
 
 cp graviton-validation/raw/go-list-deps-arm64.json graviton-validation/raw/go-list-deps.json
@@ -159,21 +162,31 @@ go mod graph > graviton-validation/raw/module-graph.txt 2>/dev/null
 # .err file names each one with the import chain that reaches it.
 grep -n 'build constraints exclude all Go files' graviton-validation/raw/go-list-deps-arm64.err
 
-# Pass 2: every directory in the tree, named explicitly, to catch the unimported ones.
-: > graviton-validation/raw/constraint-sweep-arm64.err
-: > graviton-validation/raw/constraint-sweep-amd64.err
-find . -name '*.go' -not -path './.git/*' 2>/dev/null | sed 's|/[^/]*$||' | sort -u \
-  | while read -r d; do
-      CGO_ENABLED=1 GOOS=linux GOARCH=arm64 go list "$d" \
-        >/dev/null 2>>graviton-validation/raw/constraint-sweep-arm64.err
-      CGO_ENABLED=1 GOOS=linux GOARCH=amd64 go list "$d" \
-        >/dev/null 2>>graviton-validation/raw/constraint-sweep-amd64.err
-    done
+# Pass 2: every package directory of this module, named explicitly, to catch the
+# unimported ones. "Package directory" by the go command's rules: testdata/, vendor/
+# and directories starting with _ or . are never built, and a directory with its own
+# go.mod belongs to another module (sweep it from there). Measured: enumerating with a
+# bare `find -name '*.go'` reported fixtures under testdata/ and _scratch/ as Shape C.
+find . \( -type d \( -name vendor -o -name testdata -o -name '_*' -o -name '.?*' \) -prune \) \
+    -o \( -type d ! -name . -exec test -f '{}/go.mod' \; -prune \) \
+    -o \( -type f -name '*.go' ! -name '_*' -print \) \
+  | sed 's|/[^/]*$||' | sort -u > graviton-validation/raw/package-dirs.txt
+
+# ONE go list call per architecture, batched by xargs - not one call per directory.
+# -e records each package's error in the output instead of aborting; measured on
+# golang.org/x/text (67 directories) this is 0.22 s against 2.6 s for the loop.
+for a in arm64 amd64; do
+  tr '\n' '\0' < graviton-validation/raw/package-dirs.txt \
+    | xargs -0 env CGO_ENABLED=1 GOOS=linux GOARCH=$a go list -e -tags="$TAGS" \
+        -f '{{.Dir}}{{"\t"}}{{with .Error}}{{.Err}}{{end}}' \
+    | grep 'build constraints exclude all Go files' | cut -f1 | sort -u \
+    > graviton-validation/raw/constraint-sweep-$a.txt
+done
 
 # A package excluded on arm64 and not on amd64 is a confirmed architecture-specific
 # finding, whether or not anything imports it yet.
-diff graviton-validation/raw/constraint-sweep-amd64.err \
-     graviton-validation/raw/constraint-sweep-arm64.err
+comm -23 graviton-validation/raw/constraint-sweep-arm64.txt \
+         graviton-validation/raw/constraint-sweep-amd64.txt
 ```
 
 The two-pass result is what makes a Shape C verdict defensible: pass 1 says *this blocks the build*, pass 2 says *this will block the build as soon as it is imported*, and the amd64 sweep proves the exclusion is about the architecture and not about a package that is broken everywhere.
@@ -191,23 +204,16 @@ What is worth reporting is a **non-standard** package present on one architectur
 absent on the other, because that is project or dependency code disappearing:
 
 ```bash
+# go list's own -f template does the filtering; no JSON parser is needed.
 for a in arm64 amd64; do
-  python3 - "graviton-validation/raw/go-list-deps-$a.json" >"/tmp/set.$a" <<'PY'
-import json, sys
-dec = json.JSONDecoder(); buf = open(sys.argv[1]).read(); i, n = 0, len(buf); out = []
-while i < n:
-    while i < n and buf[i] in " \t\r\n": i += 1
-    if i >= n: break
-    try: obj, i = dec.raw_decode(buf, i)
-    except ValueError: break
-    if obj.get("Standard"): continue      # the stdlib differs between ports by design
-    out.append(obj["ImportPath"])
-for p in sorted(set(out)): print(p)
-PY
+  CGO_ENABLED=1 GOOS=linux GOARCH=$a go list -e -deps -tags="$TAGS" \
+    -f '{{if and (not .Standard) (not .Error)}}{{.ImportPath}}{{end}}' ./... \
+    | grep -v '^$' | sort -u > "graviton-validation/raw/nonstd-set-$a.txt"
 done
-sort -o /tmp/set.arm64 /tmp/set.arm64; sort -o /tmp/set.amd64 /tmp/set.amd64
-echo "--- resolve on amd64 but NOT arm64 (a finding) ---"; comm -13 /tmp/set.arm64 /tmp/set.amd64
-echo "--- resolve on arm64 only (usually an arm64 implementation package, fine) ---"; comm -23 /tmp/set.arm64 /tmp/set.amd64
+echo "--- resolve on amd64 but NOT arm64 (a finding) ---"
+comm -13 graviton-validation/raw/nonstd-set-arm64.txt graviton-validation/raw/nonstd-set-amd64.txt
+echo "--- resolve on arm64 only (usually an arm64 implementation package, fine) ---"
+comm -23 graviton-validation/raw/nonstd-set-arm64.txt graviton-validation/raw/nonstd-set-amd64.txt
 ```
 
 The same measurement confirms the `Standard` filter that Phase 1.2's cgo scan applies:
@@ -249,42 +255,19 @@ cgo is the first thing to resolve because it decides the whole shape of the migr
 From the fact base, not from grep. **The capture must have been made with `CGO_ENABLED=1`** (Phase 1.1) — with cgo disabled, `go list` moves cgo files into `IgnoredGoFiles` and this scan returns zero for a project that is full of cgo:
 
 ```bash
-# Guard against the silent-empty case before trusting a zero result
-grep -c '"CgoFiles"' graviton-validation/raw/go-list-deps.json
-grep -o '"IgnoredGoFiles":\[[^]]*\]' graviton-validation/raw/go-list-deps.json \
-  | grep -c 'cgo'      # cgo files hiding in IgnoredGoFiles = the capture had cgo off
+# Guard against the silent-empty case before trusting a zero result: ask the build
+# context itself whether cgo was on. Must print `true`.
+CGO_ENABLED=1 GOOS=linux GOARCH=arm64 go list -f '{{context.CgoEnabled}}' std 2>/dev/null | head -1
 ```
 
 ```bash
-# Every package in the resolved set whose build includes C files, with the C libraries it links.
-# Works with python3 or jq; python3 is used here because it needs no extra install.
-python3 - <<'PY' > graviton-validation/raw/cgo-packages.txt
-import json, sys
-dec = json.JSONDecoder()
-buf = open("graviton-validation/raw/go-list-deps.json").read()
-i, n = 0, len(buf)
-rows = []
-while i < n:
-    while i < n and buf[i] in " \t\r\n":
-        i += 1
-    if i >= n:
-        break
-    obj, i = dec.raw_decode(buf, i)
-    cgo = obj.get("CgoFiles") or []
-    if not cgo:
-        continue
-    # Skip the standard library. With CGO_ENABLED=1, runtime/cgo always reports
-    # CgoFiles, and net and os/user can too; none of them is ever the finding.
-    if obj.get("Standard"):
-        continue
-    ld = " ".join(obj.get("CgoLDFLAGS") or [])
-    cf = " ".join(obj.get("CgoCFLAGS") or [])
-    pkg = " ".join(obj.get("CgoPkgConfig") or [])
-    rows.append(f'{obj["ImportPath"]}\tcgofiles={len(cgo)}\tLDFLAGS=[{ld}]\tCFLAGS=[{cf}]\tpkgconfig=[{pkg}]')
-for r in sorted(rows):
-    print(r)
-print(f"# total cgo packages: {len(rows)}", file=sys.stderr)
-PY
+# Every package in the resolved set whose build includes C files, with the C libraries
+# it links - straight from go list's -f template, no JSON parser needed.
+# The standard library is skipped: with CGO_ENABLED=1, runtime/cgo always reports
+# CgoFiles, and net and os/user can too; none of them is ever the finding.
+CGO_ENABLED=1 GOOS=linux GOARCH=arm64 go list -e -deps -tags="$TAGS" -f \
+  '{{if and .CgoFiles (not .Standard)}}{{.ImportPath}}{{"\t"}}cgofiles={{len .CgoFiles}}{{"\t"}}LDFLAGS=[{{join .CgoLDFLAGS " "}}]{{"\t"}}CFLAGS=[{{join .CgoCFLAGS " "}}]{{"\t"}}pkgconfig=[{{join .CgoPkgConfig " "}}]{{end}}' \
+  ./... | grep -v '^$' | sort -u > graviton-validation/raw/cgo-packages.txt
 
 wc -l graviton-validation/raw/cgo-packages.txt
 ```
@@ -402,8 +385,8 @@ grep -n 'build constraints exclude all Go files' graviton-validation/raw/go-list
 # unimported Shape C package (measured: ./... skips it silently, in go list,
 # go build AND go vet). Diff against the amd64 sweep so the verdict is
 # architecture-specific rather than "this package is broken everywhere".
-diff graviton-validation/raw/constraint-sweep-amd64.err \
-     graviton-validation/raw/constraint-sweep-arm64.err
+comm -23 graviton-validation/raw/constraint-sweep-arm64.txt \
+         graviton-validation/raw/constraint-sweep-amd64.txt
 ```
 
 Report the two kinds separately — they need different urgency:
@@ -605,13 +588,18 @@ grep -rn --include='*.go' -E '\bgo func\b' . --exclude-dir=vendor 2>/dev/null | 
 grep -rn --include='*.go' -E 'sync/atomic|atomic\.(Load|Store|Add|Swap|Compare)' . --exclude-dir=vendor 2>/dev/null
 grep -rn --include='*.go' -E '//[[:space:]]*(nolint|race|NOTE).*(race|lock|atomic)' . --exclude-dir=vendor 2>/dev/null
 
-# A test suite that cannot run under -race at all is itself a finding (CGO_ENABLED=0 disables -race on
-# some platforms; -race needs cgo on Linux for the runtime, available on linux/arm64 since Go 1.14)
-grep -rn -E 'go test' . --include='Makefile' --include='*.sh' --include='*.yml' --include='*.yaml' \
-  --exclude-dir=.git 2>/dev/null | grep -v -- '-race' | head -20
+# Does anything run the race detector? Projects rarely write it as `go test -race` on one
+# line: gotestsum -- -race, ginkgo --race, TESTFLAGS ?= -race, GOFLAGS=-race and Bazel's
+# `race = "on"` all count. Measured: a `gotestsum -- -race ./...` Makefile was reported
+# as "never runs -race" by a check that looked for `go test` and `-race` on one line.
+grep -rnE '(^|[^A-Za-z0-9_-])--?race([^A-Za-z0-9_-]|$)|race[[:space:]]*=[[:space:]]*"on"|go/config:race' . \
+  --include='Makefile' --include='GNUmakefile' --include='*.mk' --include='*.sh' --include='*.yml' \
+  --include='*.yaml' --include='justfile' --include='Earthfile' --include='*.bzl' --include='BUILD*' \
+  --include='.bazelrc' --include='magefile*.go' --exclude-dir=.git --exclude-dir=vendor 2>/dev/null \
+  | grep -vE '^[^:]*:[0-9]+:[[:space:]]*(#|//)' | head -20
 ```
 
-If the project's CI never runs `-race`, say so plainly in the report. It means no one has ever checked, and the migration is carrying an unknown.
+If nothing runs `-race`, say so plainly in the report. It means no one has ever checked, and the migration is carrying an unknown. It is an ADVISORY rather than a finding (`go_arch_scan.sh` reports it that way): the gap is in how the project is tested, and exit criterion 9 runs the detector regardless.
 
 ### x86 CPU feature gates
 

@@ -88,12 +88,9 @@ Record which mechanism was used. If the toolchain used here differs from the dep
 
 ### Keep build output out of the project tree
 
-So that `git add -A` in Phase 2's commits never picks it up:
+Binaries do not belong in the project tree, not even in `graviton-validation/` (which is excluded from git, but is still the user's report directory, not a build cache):
 
 ```bash
-export GOBIN="$PWD/graviton-validation/.bin"      # inside the output dir, which is committed deliberately
-mkdir -p "$GOBIN"
-# or, fully outside:
 export GOBIN="${TMPDIR:-/tmp}/graviton-bin"; mkdir -p "$GOBIN"
 ```
 

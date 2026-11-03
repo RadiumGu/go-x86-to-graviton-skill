@@ -93,19 +93,27 @@ package example.com/svc/cmd/app
 Once a package imports it, all four report it. So `./...` covers exactly the set that blocks the build today, and misses the latent ones:
 
 ```bash
-: > graviton-validation/raw/constraint-sweep-arm64.err
-: > graviton-validation/raw/constraint-sweep-amd64.err
-find . -name '*.go' -not -path './.git/*' 2>/dev/null | sed 's|/[^/]*$||' | sort -u \
-  | while read -r d; do
-      CGO_ENABLED=1 GOOS=linux GOARCH=arm64 go list "$d" \
-        >/dev/null 2>>graviton-validation/raw/constraint-sweep-arm64.err
-      CGO_ENABLED=1 GOOS=linux GOARCH=amd64 go list "$d" \
-        >/dev/null 2>>graviton-validation/raw/constraint-sweep-amd64.err
-    done
+# Package directories by the go command's rules: testdata/, vendor/, _* and .* are never
+# built, and a directory with its own go.mod is a different module (sweep it from there).
+find . \( -type d \( -name vendor -o -name testdata -o -name '_*' -o -name '.?*' \) -prune \) \
+    -o \( -type d ! -name . -exec test -f '{}/go.mod' \; -prune \) \
+    -o \( -type f -name '*.go' ! -name '_*' -print \) \
+  | sed 's|/[^/]*$||' | sort -u > graviton-validation/raw/package-dirs.txt
 
-diff graviton-validation/raw/constraint-sweep-amd64.err \
-     graviton-validation/raw/constraint-sweep-arm64.err
+# One batched go list per architecture; -e puts each package's error in the output.
+for a in arm64 amd64; do
+  tr '\n' '\0' < graviton-validation/raw/package-dirs.txt \
+    | xargs -0 env CGO_ENABLED=1 GOOS=linux GOARCH=$a go list -e -tags="$TAGS" \
+        -f '{{.Dir}}{{"\t"}}{{with .Error}}{{.Err}}{{end}}' \
+    | grep 'build constraints exclude all Go files' | cut -f1 | sort -u \
+    > graviton-validation/raw/constraint-sweep-$a.txt
+done
+
+comm -23 graviton-validation/raw/constraint-sweep-arm64.txt \
+         graviton-validation/raw/constraint-sweep-amd64.txt
 ```
+
+Use the deployment's `-tags` (`TAGS`): a package that is Shape C only under the release tag looks clean to an untagged sweep.
 
 Report the two kinds separately: reachable = blocks the build now; sweep-only = blocks it the moment someone adds the import.
 

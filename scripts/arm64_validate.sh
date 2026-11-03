@@ -1,10 +1,13 @@
 #!/usr/bin/env bash
 # arm64_validate.sh - run the Phase 3 build/vet/test/race matrix and write the logs
-# under graviton-validation/raw/ with the canonical names the reports cite.
+# under graviton-validation/raw/ (or --out DIR) with the canonical names the reports cite.
 #
-# It does NOT modify the project's source. It writes only inside
-# graviton-validation/ and uses a GOBIN outside the tree, so `git add -A` on the
-# project never picks up build output.
+# It does NOT modify the project's source. It writes only the log directory, and
+# builds binaries into a GOBIN outside the tree. The default log directory IS inside
+# the project: it is reported, not committed, so keep it out of git with
+#     echo 'graviton-validation/' >> .git/info/exclude
+# (local to the clone - it does not touch the project's .gitignore). The script warns
+# when the log directory would show up in `git status`.
 #
 # What it can prove depends entirely on where it runs:
 #   x86 host        -> cross-build, vet and race (criteria 1, 5, 9)
@@ -14,6 +17,9 @@
 # Usage:
 #   ./arm64_validate.sh [PROJECT_DIR] [--cgo 0|1] [--count N] [--skip REGEX]
 #                       [--build-cmd 'make release'] [--tags 'netgo,osusergo']
+#                       [--out DIR]
+#   Flags take one or two dashes and either `--flag value` or `--flag=value`.
+#   --out DIR is resolved against the directory you run the script from.
 #
 # Exit status:
 #   0  every check that could run, passed
@@ -30,26 +36,53 @@ COUNT=1
 SKIP=""
 BUILD_CMD=""
 TAGS=""
+OUTDIR=""
 
+need() { [ "$2" -ge 2 ] || { echo "arm64_validate: $1 needs a value" >&2; exit 2; }; }
 while [ $# -gt 0 ]; do
   case "$1" in
-    --cgo)       CGO="${2:-}"; shift 2 ;;
-    --count)     COUNT="${2:-1}"; shift 2 ;;
-    --skip)      SKIP="${2:-}"; shift 2 ;;
-    --build-cmd) BUILD_CMD="${2:-}"; shift 2 ;;
-    --tags)      TAGS="${2:-}"; shift 2 ;;
-    -h|--help)   sed -n '2,26p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
-    -*)          echo "unknown option: $1" >&2; exit 2 ;;
-    *)           PROJECT="$1"; shift ;;
+    # --flag=value -> --flag value. Splits at the FIRST '=', so --build-cmd='make X=1' works.
+    -*=*) _o=${1%%=*}; _v=${1#*=}; shift; set -- "$_o" "$_v" "$@"; continue ;;
+  esac
+  case "$1" in
+    -cgo|--cgo)             need "$1" $#; CGO=$2; shift 2 ;;
+    -count|--count)         need "$1" $#; COUNT=$2; shift 2 ;;
+    -skip|--skip)           need "$1" $#; SKIP=$2; shift 2 ;;
+    -build-cmd|--build-cmd) need "$1" $#; BUILD_CMD=$2; shift 2 ;;
+    -tags|--tags)           need "$1" $#; TAGS=$2; shift 2 ;;
+    -out|--out)             need "$1" $#; OUTDIR=$2; shift 2 ;;
+    -h|-help|--help)        sed -n '2,29p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -*)                     echo "arm64_validate: unknown flag: $1 (see --help)" >&2; exit 2 ;;
+    *)                      PROJECT="$1"; shift ;;
   esac
 done
+case "$CGO" in ""|0|1) ;; *) echo "arm64_validate: --cgo must be 0 or 1, got '$CGO'" >&2; exit 2 ;; esac
+case "$COUNT" in ''|*[!0-9]*) echo "arm64_validate: --count must be a positive integer, got '$COUNT'" >&2; exit 2 ;; esac
+# --out is relative to where the user ran us from, so resolve it before the cd.
+if [ -n "$OUTDIR" ]; then
+  case "$OUTDIR" in /*) ;; *) OUTDIR="$(pwd)/$OUTDIR" ;; esac
+fi
 
 cd "$PROJECT" 2>/dev/null || { echo "not a directory: $PROJECT" >&2; exit 2; }
 command -v go >/dev/null 2>&1 || { echo "go not found on PATH" >&2; exit 2; }
 [ -f go.mod ] || [ -f go.work ] || { echo "no go.mod or go.work in $(pwd)" >&2; exit 2; }
 
-RAW="graviton-validation/raw"
+RAW="${OUTDIR:-graviton-validation/raw}"
 mkdir -p "$RAW" || exit 2
+# A log directory inside the work tree that git does not ignore ends up in the next
+# `git add -A` and in the migration PR. check-ignore exits 1 for "inside the repo, not
+# ignored"; 0 (ignored) and 128 (not a repo, or outside it) are both fine.
+git check-ignore -q "$RAW/arm64-build.log" >/dev/null 2>&1
+if [ $? -eq 1 ]; then
+  echo "warning: $RAW is inside the git work tree and not ignored - it will show up in"
+  echo "         'git status' and can be swept into a commit. Keep it local with:"
+  case "$RAW" in
+    /*) _ex="<$RAW, relative to the repository root>/" ;;
+    *)  _ex="${RAW%%/*}/" ;;
+  esac
+  echo "           echo '$_ex' >> \"\$(git rev-parse --git-dir)/info/exclude\""
+  echo
+fi
 GOBIN_DIR="${TMPDIR:-/tmp}/graviton-bin.$$"
 mkdir -p "$GOBIN_DIR"
 cleanup() { rm -rf "$GOBIN_DIR"; }

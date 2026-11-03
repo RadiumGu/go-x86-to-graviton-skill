@@ -81,14 +81,13 @@ Java 和 Python 的 Graviton skill，大部分精力花在一个**产物可用�
 ## 最短路径
 
 ```bash
-# 1. 装 skill（Claude Code 示例；其他平台见下一节）
-git clone --depth 1 https://github.com/RadiumGu/go-x86-to-graviton-skill.git /tmp/gs && \
-  mkdir -p ~/.claude/skills/go-x86-to-graviton && \
-  cp -r /tmp/gs/{SKILL.md,POWER.md,summaries.md,phases,document_references,scripts} \
-        ~/.claude/skills/go-x86-to-graviton/ && rm -rf /tmp/gs
+# 1. 装 skill（Claude Code 示例；其他平台见下一节）。skill 目录就是一个 git clone，
+#    以后用 git pull 更新
+git clone --depth 1 https://github.com/RadiumGu/go-x86-to-graviton-skill.git \
+  ~/.claude/skills/go-x86-to-graviton
 
-# 2. 先用只读脚本扫一眼，判断这次迁移的量级
-/tmp/gs/scripts/go_arch_scan.sh /path/to/your/project
+# 2. 先用只读脚本扫一眼，判断这次迁移的量级。-tags 填部署时用的 build tags
+~/.claude/skills/go-x86-to-graviton/scripts/go_arch_scan.sh -tags "" /path/to/your/project
 ```
 
 然后在你的项目目录里对 agent 说：
@@ -120,31 +119,31 @@ Kiro 读的是 `POWER.md`。
 
 **Settings**（`Cmd+Shift+J` / `Ctrl+Shift+J`）→ **Rules** → **Add Rule** → **Remote Rule (GitHub)**，粘贴同一个地址。
 
-### Claude Code
+### 用户级安装（Claude Code、Codex、Goose）：clone，之后 `git pull` 更新
+
+skill 目录就是这个仓库的一个 clone，更新只要一条命令，`git log` 就能看到装的是哪个版本：
 
 ```bash
 git clone --depth 1 https://github.com/RadiumGu/go-x86-to-graviton-skill.git \
-    /tmp/go-graviton-skill && \
-  mkdir -p ~/.claude/skills/go-x86-to-graviton && \
-  cp -r /tmp/go-graviton-skill/{SKILL.md,POWER.md,summaries.md,phases,document_references,scripts} \
-        ~/.claude/skills/go-x86-to-graviton/ && \
-  rm -rf /tmp/go-graviton-skill
+  ~/.claude/skills/go-x86-to-graviton
+
+# 更新
+git -C ~/.claude/skills/go-x86-to-graviton pull --ff-only
 ```
 
-### 其他平台
+其他 agent 换成各自的目录：`~/.codex/skills/go-x86-to-graviton`、`~/.config/goose/skills/go-x86-to-graviton`。
 
-拷贝动作完全一样，只换目标目录：
+### 项目级安装（`.agents/skills/`、GitHub Copilot、Windsurf、Roo Code）：解包，不要嵌套仓库
 
-| 平台 | 目标目录 |
-|---|---|
-| GitHub Copilot / VS Code | `.github/skills/go-x86-to-graviton/`（项目级） |
-| OpenAI Codex | `~/.codex/skills/go-x86-to-graviton/` |
-| Windsurf | `.windsurf/skills/go-x86-to-graviton/`（项目级） |
-| Goose | `~/.config/goose/skills/go-x86-to-graviton/` |
-| Roo Code | `.roo/skills/go-x86-to-graviton/`（项目级） |
-| **任意兼容平台** | `.agents/skills/go-x86-to-graviton/`（项目级，跨平台标准路径） |
+不要 clone 到项目里面。仓库里再套一个 git 仓库就是 embedded repo，`git add` 会报警告，同事拉下来也拿不到内容。正确做法是解包一份快照，像普通文件一样提交：
 
-`.agents/skills/` 是 Agent Skills 规范的跨平台标准路径，所有兼容平台都会读。
+```bash
+D=.agents/skills/go-x86-to-graviton     # 或 .github/skills/...、.windsurf/skills/...、.roo/skills/...
+mkdir -p "$D" && curl -fsSL https://github.com/RadiumGu/go-x86-to-graviton-skill/archive/refs/heads/main.tar.gz \
+  | tar -xz --strip-components=1 --exclude='*/tests' --exclude='*/examples' --exclude='*/.github' -C "$D"
+```
+
+要钉版本，把 `refs/heads/main` 换成某个 commit SHA。更新时删掉 `$D` 重跑同一条命令。`.agents/skills/` 是 Agent Skills 规范的跨平台标准路径，所有兼容平台都会读。
 
 ### 验证装没装上
 
@@ -166,7 +165,7 @@ git clone --depth 1 https://github.com/RadiumGu/go-x86-to-graviton-skill.git \
 | **arm64 环境**：Graviton EC2 / Apple Silicon / GitHub `ubuntu-24.04-arm` runner / arm64 容器 | 只有「交叉编译能过」这一条结论。**交叉编译不执行任何代码**，第 1 类（带 cgo）和第 4 类对它完全不可见 |
 | **容器运行时** | 镜像平台检查和容器内产物扫描变成 `CHECK` |
 | **C 编译器** | cgo 项目无法原生构建；**而且纯 Go 项目也跑不了 `go test -race`**——竞争检测器需要 cgo |
-| **git** | 每一步都提交，所以每个改动可以单独 revert；没有 git 就失去这个能力 |
+| **git，且工作区干净** | skill 在新分支 `graviton/arm64-migration` 上每一步一个提交，只 `git add` 这一步改过的文件，所以每个改动可以单独 revert。工作区有未提交的改动时它会停下来让你先提交或 stash（不会替你做）；项目不在 git 里时它会先问你要不要 `git init`。它不推送、不开 PR |
 
 ### 关于「交叉编译」和「模拟器」：各自能证明什么
 
@@ -344,7 +343,7 @@ Phase 1 全程只读，只写 `graviton-validation/`，适合先摸清量级再�
 
 ## 输出怎么读
 
-全部写在你项目的 `graviton-validation/` 下。
+代码改动在 `graviton/arm64-migration` 分支上，一步一个提交。报告全部写在你项目的 `graviton-validation/` 下，这个目录通过 `.git/info/exclude` 排除在 git 之外（只对本地 clone 生效，不改你的 `.gitignore`），所以不会混进迁移的 diff。要把报告也提交，跟 agent 说一声，它会单独做最后一个提交。
 
 ```
 graviton-validation/
@@ -374,31 +373,46 @@ review 代码改动时，重点看两件事：
 
 ## 独立使用两个脚本
 
-两个脚本都只用 bash 和 coreutils，兼容 bash 3.2，不装 agent 也能单独用。
+两个脚本只需要 bash 3.2+ 和 POSIX 工具（不需要 python），不装 agent 也能单独用。参数一个或两个横线都行（`-tags x` 或 `--tags=x`），**写错的参数会直接报错退出**，不会被悄悄忽略。
 
 ### `go_arch_scan.sh` — 只读静态扫描
 
-覆盖 Phase 1 里可确定的部分。**不在被扫描的目录里写任何东西**，也不跑项目的构建。
+覆盖 Phase 1 里可确定的部分。除了 `-o` 指定的文件，**不在被扫描的目录里写任何东西**，也不跑项目的构建。
 
 ```bash
-# 直接看
 ./scripts/go_arch_scan.sh /path/to/project
-
-# 存成 Phase 1 的原始输出
-./scripts/go_arch_scan.sh . > graviton-validation/raw/go-arch-scan.txt
+./scripts/go_arch_scan.sh -tags netgo,osusergo .          # 填部署时用的 build tags
+./scripts/go_arch_scan.sh -o graviton-validation/raw .     # 同时写到 raw/go-arch-scan.txt
+./scripts/go_arch_scan.sh -json . | jq '.summary'          # 一个 JSON 文档，给 CI 用
 ```
 
-退出码：`0` 干净，`1` 有发现，`2` 不是 Go 项目。输出每行前缀 `OK` / `CHECK` / `FINDING`——**`CHECK` 是线索不是结论**，写 `PASS` 之前必须逐条消掉。
+| 参数 | 作用 |
+|---|---|
+| `-tags LIST` | 和 `go build -tags` 一样。树里用到、但这次没传进来的 tag 会在一条 CHECK 里列出来，因为只在某个 tag 下才出现的 Shape C，不带这个 tag 根本扫不出来 |
+| `-o FILE` | 报告同时写到 FILE（给目录就写 `go-arch-scan.txt`，加 `-json` 时写 `.json`） |
+| `-json` | 同一份报告的 JSON 形式：`summary`、`exit_code`，每条结论一个 item 并带明细 |
+| `-strict` | ADVISORY 也算失败 |
 
-没有 Go 工具链时它降级成 grep 模式，所有结论都是 `CHECK`，并在开头明确说明自己在降级模式。有工具链时它用 `go list` 作事实基础，并跑完两趟 Shape C 检测。
+| 级别 | 含义 | 是否让扫描失败 |
+|---|---|---|
+| `FINDING` | 需要做 arm64 迁移改动 | 是（退出码 1） |
+| `ADVISORY` | 不是迁移工作，是测试方式上的缺口，比如从来不跑 `-race` | 只在 `-strict` 下 |
+| `CHECK` | 脚本判断不了的线索，写 `PASS` 之前必须逐条消掉 | 否 |
+| `OK` | 查过、没问题，特意记一行，免得后来有人去"修" | 否 |
 
-批量预筛：
+退出码 `2` 表示参数错误、目录不是 Go 项目，或者扫描跑不起来。
+
+它按 go 命令自己的规则判断目录：`testdata/` 和以 `_`、`.` 开头的目录不是包；树里每个 `go.mod` 都单独作为一个模块解析（`go.work` 根目录可以直接扫，workspace 没列进去的模块用 `GOWORK=off` 单独解析）。有工具链时它用 `go list -e` 作事实基础，每个架构每个模块只调用一次（批量传入全部目录）；没有工具链时降级成 grep 模式，所有结论都是 `CHECK`，并在开头说明。
+
+批量预筛（退出码 2 是"没扫成"，不能当成"有发现"）：
 
 ```bash
+S=~/.claude/skills/go-x86-to-graviton/scripts/go_arch_scan.sh
 for d in ~/repos/*/; do
-  [ -f "$d/go.mod" ] || continue
+  [ -f "$d/go.mod" ] || [ -f "$d/go.work" ] || continue
   printf '%-40s ' "$(basename "$d")"
-  ./scripts/go_arch_scan.sh "$d" >/dev/null 2>&1 && echo "clean" || echo "has findings"
+  "$S" "$d" >/dev/null 2>&1
+  case $? in 0) echo "no findings" ;; 1) echo "has findings" ;; *) echo "scan failed" ;; esac
 done
 ```
 
@@ -412,8 +426,11 @@ done
   --tags 'netgo,osusergo' \
   --count 5 \
   --skip 'TestPostgres|TestS3' \
-  --build-cmd 'make release'
+  --build-cmd 'make release' \
+  --out graviton-validation/raw        # 默认值
 ```
+
+日志目录默认在项目里面。用 `echo 'graviton-validation/' >> .git/info/exclude` 把它排除在 git 之外，不用改你的 `.gitignore`；如果这个目录会出现在 `git status` 里，脚本会给出警告。
 
 它会判断自己是否在 arm64 上（分不出 QEMU 模拟和真机，`docker run --platform linux/arm64` 下的结果要自己注明）。`go vet` 和 race 检查在任何主机上都会跑（两者都不依赖执行 arm64 代码），并记录各自是在哪个架构上跑的；**其余测不了的检查一律报 `NOT RUN` 而不是 `PASS`**。
 
@@ -497,10 +514,13 @@ done
 - 标准库过滤（否则 `runtime/cgo` 会出现在每一份 cgo 清点里）
 - `#cgo` 的 x86 flag 检测，`// #cgo` 和块注释两种写法都覆盖
 - 无约束 `.s` 文件的检测，以及它产生的真实构建报错原文
-- 扫描脚本的三个退出码，分别在坏 fixture、干净项目、非 Go 目录上
+- 扫描脚本的退出码：有 FINDING 为 1；只有 ADVISORY 为 0，加 `-strict` 为 1；参数错误和非 Go 目录为 2
+- 目录与模块按 go 命令的规则处理（`tests/fixtures/layout/`、`tests/fixtures/workspace/`）：`testdata/`、`_scratch/`、`.cache/` 下的 amd64-only 文件不报；嵌套模块里被 import 的 Shape C 能报出来；`go.work` 根目录能解析；只在 `-tags prod` 下出现的 Shape C 带上 tag 能报出来，不带时会提示这个 tag 没被评估；`gotestsum -- -race` 被识别为跑了 race
+- 新旧扫描器在 containerd、minio、klauspost/compress 同一 commit 上的 FINDING/CHECK 逐行一致（新版每个仓库多一条「未评估的 build tag」CHECK），耗时 containerd 69.3 s → 4.3 s、minio 10.6 s → 3.1 s、compress 2.4 s → 1.1 s
+- cgo 四条路线在 Graviton 真机上逐一跑通（见 README 的 Verification status）
 - `arm64_validate.sh` 在 arm64 硬件上端到端跑通，包括「没有 C 编译器时把 race 条件报成 `NOT RUN` 而不是 `PASS`」这个分支
 
-**未验证**：cgo 路线 2/3/4 的解析命令对真实发行版索引和 module cache 的执行；容器和部署描述符相关路径。这些来自 Go 与 AWS 的规范文档和工具链自身行为，不是实际跑出来的。
+**未验证**：容器和部署描述符相关路径（Phase 3.3）；真实服务的启动验证；扫描一个真实的 `go.work` 仓库（目前只有 fixture）；其他发行版的 Route 2 可用性查询命令。
 
 **整个 skill 不断言任何依赖的版本下限。** 凭记忆写的下限是一个等着发生的错误结论，所以文档给的是「该跑哪条命令去查」，而不是「某版本起支持 arm64」。
 
