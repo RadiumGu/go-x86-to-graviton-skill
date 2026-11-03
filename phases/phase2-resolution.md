@@ -121,7 +121,8 @@ Record the upgrade in `02-cgo-report.md` as `ARM64-REQUIRED` with the archive na
 go get "$mod@$ver"
 go mod tidy
 [ -d vendor ] && go mod vendor      # a vendored project MUST re-vendor, or the old archive still ships
-git add -A && git commit -m "2.2 deps: $mod -> $ver for bundled linux/arm64 archive"
+git add -- go.mod go.sum $( [ -d vendor ] && echo vendor )      # this step's files only
+git commit -m "2.2 deps: $mod -> $ver for bundled linux/arm64 archive"
 ```
 
 Many such modules also offer a dynamic-linking build tag as an alternative to the bundle (`-tags dynamic` for `confluent-kafka-go`), which trades the bundled archive for a system library and so converts Route 3 into Route 2. Offer both; the choice is the user's, because it changes their deployment image.

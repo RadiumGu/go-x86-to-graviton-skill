@@ -123,7 +123,7 @@ grep -rn --include='*.go' --include='*.s' -E '^//[[:space:]]*(go:build|\+build)[
 
 # 2. A dependency change requires re-vendoring, or the old code still ships
 go get github.com/example/dep@v1.9.0 && go mod tidy && go mod vendor
-git add -A vendor go.mod go.sum
+git add -- vendor go.mod go.sum
 
 # 3. Never hand-edit vendor/. Verify consistency instead:
 go mod verify
@@ -137,7 +137,7 @@ A non-empty `git diff vendor/` after a fresh `go mod vendor`, before any Phase 2
 `go.work` changes which module versions resolve, so every `go list`, `go build` and `go test` must run from the workspace root — the directory the deployment builds from. Running from a member module resolves a different version set and analyses a tree that does not ship.
 
 ```bash
-go work edit -json | python3 -c 'import json,sys; d=json.load(sys.stdin); print([u["DiskPath"] for u in d.get("Use",[])])'
+go list -m -f '{{.Dir}}'      # in workspace mode: the directory of every module go.work uses
 # Validate each member resolves for arm64
 GOOS=linux GOARCH=arm64 go build ./... 2>&1 | tail
 ```

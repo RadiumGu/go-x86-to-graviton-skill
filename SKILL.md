@@ -80,7 +80,7 @@ Copy this checklist into your response and check off each step:
 
 ```
 ARM64 migration progress:
-- [ ] Baseline commit; `graviton-validation/raw/` created; `skill-config.md` read if present
+- [ ] Clean work tree confirmed; branch `graviton/arm64-migration` created; `graviton-validation/` excluded from git; `skill-config.md` read if present
 - [ ] 1.1 Build system, Go version, module/workspace/vendor layout, deployment type, target OS/libc/page size (01, raw/)
 - [ ] 1.2 cgo inventory: every package with CgoFiles, every C library linked, aarch64 status per library (02)
 - [ ] 1.3 Build constraints and assembly: amd64-only files with no arm64 or generic sibling, in the module AND in vendor/ (03)
@@ -102,26 +102,47 @@ ARM64 migration progress:
 
 ### Version Control Setup
 
-Initialize git if not already present:
+The deliverable is **one branch whose commits contain only migration changes**, each commit revertible on its own and reviewable as a normal pull request. Four rules, in this order, before any file changes:
 
 ```bash
-# Initialize if no git repo exists (local only, no remote required)
-if [ ! -d ".git" ]; then
-  git init
-  git add -A
-  git commit -m "Initial commit - baseline before ARM64 transformation"
-fi
+# 1. The project must already be a git work tree. `[ -d .git ]` is the wrong test: it is
+#    false in a subdirectory of a repository and in a `git worktree`, where .git is a file.
+git rev-parse --is-inside-work-tree
+
+# 2. The work tree must be clean. Anything listed here is the user's own work in progress.
+git status --porcelain --untracked-files=normal
+
+# 3. A branch of its own, from the current HEAD. Record both in 00-summary.md.
+git rev-parse --abbrev-ref HEAD && git rev-parse HEAD
+git switch -c graviton/arm64-migration
+
+# 4. Keep the report directory out of every commit WITHOUT editing the project's
+#    .gitignore (out of scope): .git/info/exclude is local to this clone.
+mkdir -p graviton-validation/raw
+EXCLUDE="$(git rev-parse --git-path info/exclude)"
+grep -qxF 'graviton-validation/' "$EXCLUDE" 2>/dev/null || echo 'graviton-validation/' >> "$EXCLUDE"
+git status --porcelain     # must still be empty
 ```
 
-**Commit after each checklist step that changes files** with `git add -A && git commit -m "<message>"`, the message naming the step; skip the commit when a step changed nothing. Build outputs and module caches created for validation live outside the project tree (Phase 3.0), so `git add -A` never picks them up — with one exception: if the project vendors dependencies, Phase 2 may legitimately change `vendor/`, and that belongs in the commit.
+- **Not a git repository (rule 1 fails):** stop and ask the user whether to initialize one. Do not run `git init` on someone's project on your own.
+- **Dirty work tree (rule 2 prints anything):** stop, show the user the list, and ask them to commit or stash it. Never stash, reset, discard or commit their changes yourself, and never start on top of them: whatever is staged later would mix their work into the migration commits.
+- **Branch name taken (rule 3 fails):** choose a new name (`graviton/arm64-migration-2`); never reuse or reset an existing branch.
+
+**Commit after each checklist step that changes files, staging exactly the files that step changed, by name**; skip the commit when a step changed nothing:
+
+```bash
+git add -- internal/hash/hash_arm64.s internal/hash/hash_generic.go   # this step's files only
+git diff --cached --name-only                                          # must list exactly those
+git commit -m "2.2 constraints: arm64 implementation for internal/hash"
+```
+
+Never `git add -A`, `git add .` or `git commit -a`: each of them picks up whatever else is in the tree. A vendored project's dependency change is staged as `git add -- vendor go.mod go.sum`. Build outputs and module caches live outside the project tree (Phase 3.0).
+
+**Reports are not part of the diff.** `graviton-validation/` is what the user reads and what the pull request description quotes; reviewers of the code change should not have to scroll past raw logs. Commit it only if the user asks, and then as one separate final commit (`git add -f -- graviton-validation/`). Do not push and do not open a pull request unless the user asks: the local branch is the deliverable.
 
 ### Documentation Setup
 
-Before Phase 1, create the output structure. See [document_references/documentation-standards.md](document_references/documentation-standards.md) for required sections and templates.
-
-```bash
-mkdir -p graviton-validation/raw
-```
+Before Phase 1, the output structure exists (Version Control Setup, rule 4, created it). See [document_references/documentation-standards.md](document_references/documentation-standards.md) for required sections and templates.
 
 Output files produced:
 
@@ -222,7 +243,10 @@ ARM64 failures are blocking. Do not relax a build constraint to make a test pass
 
 - **Cross-compiling is not validating.** `GOOS=linux GOARCH=arm64 go build ./...` passing on an x86 laptop is a genuine and valuable signal — for pure Go it is most of the build risk gone — but it executes nothing. Classes 1 (with cgo) and 4 are invisible to it
 - **Emulation counts for race detection, not for the manifestation rate.** QEMU under `docker run --platform linux/arm64` does not faithfully reproduce arm64's memory ordering, but the race detector does not depend on it: a race reported there, or on x86, is the same blocking defect (exit criterion 9). What emulation cannot give you is arm64's interleaving coverage or the 22–38% rate; when no real Graviton or Apple Silicon host ran `-race`, record that coverage as NOT RUN, not the race check itself
-- Monorepos and Go workspaces require analysis of every module and every `main` package; a workspace's `go.work` changes which module versions resolve, so capture `go list` from the workspace root as the deployment builds it
+- Monorepos and Go workspaces require analysis of every module and every `main` package. `go list ./...` from a parent module does **not** see a nested module's packages, and at a `go.work` root with no `go.mod` it fails outright (`directory prefix . does not contain modules listed in go.work`): run each capture from inside each module, which picks up the `go.work` above it. `go_arch_scan.sh` does this for every module in the tree, and resolves a module that `go.work` does not list with `GOWORK=off`
+- Directories are judged by the go command's rules, not by "contains a `.go` file": `testdata/` and directories starting with `_` or `.` are never built and are never findings
+- Pass the deployment's build tags to every capture (`-tags`, from `skill-config.md` `build_tags`). A Shape C blocker behind a tag is invisible without it; `go_arch_scan.sh` names every tag the tree uses that the scan did not evaluate
 - A vendored project (`vendor/` present) builds from `vendor/` by default (`-mod=vendor` is implied when `vendor/modules.txt` matches `go.mod`). Phase 1.3's constraint scan **must** cover `vendor/` — that is where amd64-only assembly actually lives — and a Phase 2 dependency change requires `go mod vendor` to be re-run and committed
 - Run the bash blocks with bash 3.2 or later. On macOS, where zsh is the default shell ([Apple](https://support.apple.com/en-us/102360)), start them with `bash`; on Windows, run the skill in a WSL 2 distribution ([Microsoft](https://learn.microsoft.com/en-us/windows/wsl/compare-versions)) with the project in the Linux file system
-- The helper scripts in [scripts/](scripts/) are stdlib-and-coreutils only and are read-only: they never modify the project. They degrade to a grep-only mode when the Go toolchain is unavailable, and every verdict from that mode is CHECK, not PASS
+- The helper scripts in [scripts/](scripts/) need only bash 3.2+ and POSIX tools (no python) and are read-only: they never modify the project's source. `go_arch_scan.sh` writes nothing but the `-o` file; `arm64_validate.sh` writes only its log directory. The scanner degrades to a grep-only mode when the Go toolchain is unavailable, and every verdict from that mode is CHECK, not PASS
+- `go_arch_scan.sh` exits 1 only for a FINDING (arm64 work required). A project that never runs `-race` gets an ADVISORY, which fails the scan only under `-strict`; `-json` gives the same report as one JSON document for CI
