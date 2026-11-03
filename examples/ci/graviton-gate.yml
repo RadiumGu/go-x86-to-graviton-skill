@@ -54,24 +54,29 @@ jobs:
       - name: no package excluded on arm64 but not on amd64
         run: |
           # `./...` silently skips a package nothing imports, so name every
-          # directory explicitly. Measured: go list, go build AND go vet all
-          # report zero errors for an unimported amd64-only package.
+          # package directory explicitly. Measured: go list, go build AND go vet
+          # all report zero errors for an unimported amd64-only package.
+          # Directories follow the go command's rules (testdata/, vendor/, _* and
+          # .* are never built), and only THIS module's directories are listed: a
+          # nested go.mod is another module - add a matrix entry for it.
           set -u
-          : > /tmp/a64.err; : > /tmp/x64.err
-          find . -name '*.go' -not -path './.git/*' | sed 's|/[^/]*$||' | sort -u \
-          | while read -r d; do
-              CGO_ENABLED=1 GOOS=linux GOARCH=arm64 go list "$d" >/dev/null 2>>/tmp/a64.err
-              CGO_ENABLED=1 GOOS=linux GOARCH=amd64 go list "$d" >/dev/null 2>>/tmp/x64.err
-            done
-          grep 'build constraints exclude all Go files' /tmp/a64.err 2>/dev/null \
-            | sed 's|.*in ||' | sort -u > /tmp/a64.dirs || true
-          grep 'build constraints exclude all Go files' /tmp/x64.err 2>/dev/null \
-            | sed 's|.*in ||' | sort -u > /tmp/x64.dirs || true
-          if ! comm -23 /tmp/a64.dirs /tmp/x64.dirs | grep -q .; then
+          TAGS="$DEPLOY_BUILD_TAGS"
+          find . \( -type d \( -name vendor -o -name testdata -o -name '_*' -o -name '.?*' \) -prune \) \
+              -o \( -type d ! -name . -exec test -f '{}/go.mod' \; -prune \) \
+              -o \( -type f -name '*.go' ! -name '_*' -print \) \
+            | sed 's|/[^/]*$||' | sort -u > /tmp/pkgdirs
+          for a in arm64 amd64; do
+            # one batched call per architecture; -e records per-package errors
+            tr '\n' '\0' < /tmp/pkgdirs \
+              | xargs -0 env CGO_ENABLED=1 GOOS=linux GOARCH=$a go list -e -tags="$TAGS" \
+                  -f '{{.Dir}}{{"\t"}}{{with .Error}}{{.Err}}{{end}}' \
+              | grep 'build constraints exclude all Go files' | cut -f1 | sort -u > /tmp/$a.dirs || true
+          done
+          if ! comm -23 /tmp/arm64.dirs /tmp/amd64.dirs | grep -q .; then
             echo "no arm64-only package exclusions"; exit 0
           fi
           echo "::error::packages build for amd64 but not arm64:"
-          comm -23 /tmp/a64.dirs /tmp/x64.dirs
+          comm -23 /tmp/arm64.dirs /tmp/amd64.dirs
           exit 1
 
   arm64-native:
@@ -150,14 +155,19 @@ jobs:
           # The scanner needs a resolvable module graph; without it every verdict
           # is CHECK and the gate is meaningless.
           go mod download
-          /tmp/gvskill/scripts/go_arch_scan.sh . | tee /tmp/scan.out
-          RC=${PIPESTATUS[0]}
-          grep -qE 'RESOLUTION FAILED' /tmp/scan.out && {
+          # Exit 1 means FINDINGs (arm64 work required). Advisories - such as "this
+          # project never runs -race" - do not fail the scan unless -strict is given.
+          # -o keeps a copy of the report while it prints to the log; add -json for
+          # a machine-readable report instead.
+          /tmp/gvskill/scripts/go_arch_scan.sh -tags "$DEPLOY_BUILD_TAGS" -o /tmp/scan.out .
+          RC=$?
+          [ $RC -eq 2 ] && { echo "::error::the scanner could not run"; exit 1; }
+          grep -q 'RESOLUTION FAILED' /tmp/scan.out && {
             echo "::error::module resolution failed - the scan proved nothing"; exit 1; }
-          N=$(grep -c '^FINDING' /tmp/scan.out || true)
-          echo "findings: $N"
-          if [ "$SCAN_STRICT" = "1" ] && [ "${N:-0}" -gt 0 ]; then
-            echo "::error::$N finding(s) and SCAN_STRICT=1"; exit 1
+          if [ $RC -eq 1 ]; then
+            if [ "$SCAN_STRICT" = "1" ]; then
+              echo "::error::Graviton findings and SCAN_STRICT=1 - see the log"; exit 1
+            fi
+            echo "::warning::Graviton findings - see the log"
           fi
-          [ "${N:-0}" -gt 0 ] && echo "::warning::$N Graviton finding(s) - see the log"
           exit 0

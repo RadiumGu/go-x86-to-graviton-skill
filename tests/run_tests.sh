@@ -103,8 +103,10 @@ assert_has "x86 download URL aggregated" "$OUT" 'FINDING.*x86-hardcoded download
 # shapes
 assert_has "Shape A recognized" "$OUT" 'OK.*Shape A.*internal/hash'
 assert_has "stub fallback reported" "$OUT" 'FINDING.*panic rather than implement'
-# race gate
-assert_has "missing -race reported" "$OUT" "FINDING.*no 'go test -race' anywhere"
+# race gate: an ADVISORY, not a FINDING - it is a testing gap, not migration work, and
+# counting it as a finding made exit 1 the answer for nearly every repository
+assert_has   "missing -race reported as an advisory" "$OUT" '^ADVISORY no -race anywhere'
+assert_lacks "missing -race is not a FINDING"        "$OUT" '^FINDING.*-race'
 # pure-cgo package must NOT be called Shape C (only visible with a toolchain)
 if grep -q 'OK  *resolved [0-9]* packages' "$OUT"; then
   assert_has   "pure-cgo package distinguished from Shape C" "$OUT" 'resolve ONLY with cgo enabled'
@@ -120,7 +122,7 @@ OUT2=$(mktemp); cd tests/fixtures/clean || exit 2
 cd "$ROOT" || exit 2
 assert_exit "exit 0 on a clean fixture" "$RC2" 0
 assert_lacks "no findings at all"       "$OUT2" '^FINDING'
-assert_has   "-race presence recognized" "$OUT2" "OK.*'go test -race' appears"
+assert_has   "-race presence recognized" "$OUT2" '^OK +-race is enabled in 1 place.*Makefile'
 
 echo
 echo "=== 5. not-a-Go-project ==="
@@ -188,6 +190,110 @@ grep -rnE 'not evidence for (the race check|exit criterion 9)|[Ee]mulation is no
   SKILL.md POWER.md README.md summaries.md docs/*.md phases/*.md document_references/*.md scripts/*.sh examples >"$OUT6" 2>/dev/null
 assert_lacks "no document says emulation is not evidence for criterion 9" "$OUT6" '.'
 rm -f "$OUT6"
+
+echo
+echo "=== 9. directories and modules follow the go command's rules ==="
+# Each assertion is a defect measured on the previous scanner: it enumerated directories
+# with `find -name '*.go'` and resolved only the root module.
+if command -v go >/dev/null 2>&1; then
+  OUT7=$(mktemp); cd tests/fixtures/layout || exit 2
+  "$SCAN" . >"$OUT7" 2>&1; RC7=$?
+  cd "$ROOT" || exit 2
+  assert_lacks "testdata/ is not a package"           "$OUT7" '^FINDING.*testdata'
+  assert_lacks "_scratch/ is not a package"           "$OUT7" '^FINDING.*_scratch'
+  assert_lacks ".cache/ is not a package"             "$OUT7" '^FINDING.*\.cache'
+  assert_has   "nested module is resolved"            "$OUT7" '^OK +resolved [0-9]+ packages .* in 2 of 2 module'
+  assert_has   "Shape C in the nested module found"   "$OUT7" '^FINDING +Shape C \(reachable, blocks the build\): example.com/layout/svc/simd .*imported by: example.com/layout/svc'
+  assert_lacks "reachable Shape C not double-reported" "$OUT7" 'latent until imported.*svc/simd'
+  assert_lacks "reachable Shape C not repeated as a set difference" "$OUT7" 'resolve on amd64 but NOT on arm64'
+  assert_exit  "exit 1: the nested module has a blocker" "$RC7" 1
+  # build tags
+  assert_has   "unevaluated build tag named"          "$OUT7" '^CHECK +build tags used in this tree were NOT evaluated.*prod'
+  assert_lacks "untagged scan reports no Shape C in internal/fast" "$OUT7" '^FINDING.*internal/fast'
+  OUT8=$(mktemp); cd tests/fixtures/layout || exit 2
+  "$SCAN" -tags prod . >"$OUT8" 2>&1
+  cd "$ROOT" || exit 2
+  assert_has   "-tags prod exposes the tag-gated Shape C" "$OUT8" '^FINDING +Shape C.*internal/fast'
+  assert_lacks "-tags prod: tag no longer unevaluated"    "$OUT8" 'NOT evaluated.*prod'
+  # race detection through gotestsum
+  assert_has   "gotestsum -- -race recognized"        "$OUT7" '^OK +-race is enabled.*Makefile'
+  rm -f "$OUT7" "$OUT8"
+
+  OUT9=$(mktemp); cd tests/fixtures/workspace || exit 2
+  "$SCAN" . >"$OUT9" 2>&1
+  cd "$ROOT" || exit 2
+  assert_lacks "go.work root resolves"                "$OUT9" 'RESOLUTION FAILED'
+  assert_has   "Shape C in a workspace module found"  "$OUT9" '^FINDING +Shape C \(reachable.*example.com/m1/simd'
+  assert_has   "module outside go.work resolved standalone" "$OUT9" 'module \./m2 is not listed in go.work'
+  assert_has   "both workspace modules resolved"      "$OUT9" 'in 2 of 2 module'
+  rm -f "$OUT9"
+else
+  echo "  SKIP  no Go toolchain - module and directory resolution not exercised"
+fi
+
+echo
+echo "=== 10. command line behaves like a Go tool ==="
+cd tests/fixtures/clean || exit 2
+"$SCAN" --tag prod . >/dev/null 2>&1;   assert_exit "unknown flag is an error, not ignored" $? 2
+"$SCAN" . ../broken >/dev/null 2>&1;    assert_exit "two project directories is an error"   $? 2
+"$SCAN" -tags >/dev/null 2>&1;          assert_exit "-tags without a value is an error"     $? 2
+"$SCAN" -h >/dev/null 2>&1;             assert_exit "-h exits 0"                            $? 0
+OD=$(mktemp -d)
+"$SCAN" -o "$OD/scan.txt" . >/dev/null 2>&1
+assert_has "-o FILE writes the report"      "$OD/scan.txt" '^findings: [0-9]+ +advisories'
+"$SCAN" -json -o "$OD" . >"$OD/stdout.json" 2>/dev/null; RCJ=$?
+cd "$ROOT" || exit 2
+if python3 - "$OD/go-arch-scan.json" "$RCJ" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1]))
+assert d["tool"] == "go_arch_scan" and d["schema"] == 1
+assert set(d["summary"]) == {"findings", "advisories", "checks"}
+assert d["exit_code"] == int(sys.argv[2]), (d["exit_code"], sys.argv[2])
+n = sum(1 for i in d["items"] if i["level"] == "FINDING")
+assert n == d["summary"]["findings"], (n, d["summary"])
+assert all(i["level"] in ("FINDING", "ADVISORY", "CHECK", "OK") for i in d["items"])
+PY
+then ok "-json is valid JSON, consistent with its own summary and the exit status"
+else bad "-json output"; fi
+if cmp -s "$OD/stdout.json" "$OD/go-arch-scan.json"; then ok "-json -o DIR writes DIR/go-arch-scan.json, same as stdout"
+else bad "-json -o DIR"; fi
+rm -rf "$OD"
+
+echo
+echo "=== 11. exit status: advisories do not fail the scan unless -strict ==="
+T=$(mktemp -d); cp -R tests/fixtures/clean/. "$T/"
+printf 'test:\n\tgo test ./...\n' >"$T/Makefile"     # no -race: one ADVISORY, no FINDING
+OUT10=$(mktemp)
+"$SCAN" "$T" >"$OUT10" 2>&1; RC10=$?
+assert_has  "the advisory is present"         "$OUT10" '^ADVISORY'
+assert_exit "advisory only -> exit 0"         "$RC10" 0
+"$SCAN" -strict "$T" >/dev/null 2>&1;  assert_exit "advisory with -strict -> exit 1" $? 1
+rm -rf "$T" "$OUT10"
+
+echo
+echo "=== 12. shipped instructions keep the user's repository clean ==="
+# The skill used to tell the agent to `git add -A` on the user's current branch, which
+# sweeps in their uncommitted work and untracked files and puts graviton-validation/
+# into the migration PR. Any remaining instruction to do so is a regression; lines that
+# say NOT to are fine.
+OUT11=$(mktemp)
+grep -rnE 'git add (-A|--all|\.)([[:space:]]|$|&|;|`)' SKILL.md POWER.md phases/*.md document_references/*.md \
+  docs/*.md README.md 2>/dev/null | grep -viE 'never|not |NOT|不要|禁止|instead of' >"$OUT11"
+assert_lacks "no instruction to git add -A / git add ." "$OUT11" '.'
+grep -n 'git switch -c\|git checkout -b' SKILL.md >"$OUT11"
+assert_has   "SKILL.md works on its own branch" "$OUT11" '.'
+grep -n 'status --porcelain' SKILL.md >"$OUT11"
+assert_has   "SKILL.md refuses a dirty work tree" "$OUT11" '.'
+grep -n 'info/exclude' SKILL.md >"$OUT11"
+assert_has   "SKILL.md keeps graviton-validation/ out of commits" "$OUT11" '.'
+rm -f "$OUT11"
+
+echo
+echo "=== 13. helper scripts need no python ==="
+OUT12=$(mktemp)
+grep -nE '^[^#]*python' scripts/*.sh >"$OUT12" 2>/dev/null     # code, not comments
+assert_lacks "no python in scripts/" "$OUT12" '.'
+rm -f "$OUT12"
 
 rm -f "$OUT" "$OUT2" "$OUT3" "$OUT4"
 echo
