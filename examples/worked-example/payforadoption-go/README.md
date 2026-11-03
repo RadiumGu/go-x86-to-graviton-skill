@@ -32,7 +32,7 @@ the check accused it. The fix, and the fixture that pins it
 ## Reproducing it
 
 ```bash
-git clone --depth 1 https://github.com/RadiumGu/go-x86-to-graviton-skill.git /tmp/gvskill
+git clone --depth 1 https://github.com/aws-samples/sample-go-x86-to-graviton-skill.git /tmp/gvskill
 cd /path/to/payforadoption-go
 go mod download
 /tmp/gvskill/scripts/go_arch_scan.sh .                     # Phase 1

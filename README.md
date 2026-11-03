@@ -1,10 +1,10 @@
 # Go x86-to-Graviton Migration Skill
 
+**English** | [简体中文（使用手册）](docs/USAGE.zh-CN.md)
+
 An [Agent Skill](https://agentskills.io) that drives an AI coding agent through migrating a Go application from x86 to AWS Graviton (ARM64/aarch64) — static analysis, the fixes that are actually required, and validation on real arm64 hardware.
 
 Built to the structure of the official [AWS Graviton Agent Skills](https://aws.github.io/graviton/tools/skills/), which ship skills for Java, Python and .NET but **not** Go.
-
-中文使用说明：[docs/USAGE.zh-CN.md](docs/USAGE.zh-CN.md)
 
 > **Disclaimer:** This is sample code for non-production, demonstration and learning purposes only. It is provided "as is" without warranty of any kind. Review and test it in your own environment before relying on it, and do not use it as-is for production workloads. You are responsible for validating the migration results against your own applications.
 
@@ -63,7 +63,7 @@ The skill lives at the **root of this repository**, so the repository URL is the
 Open the **Agent Steering & Skills** panel → **+** → **Import a skill** → **GitHub**, and paste:
 
 ```
-https://github.com/RadiumGu/go-x86-to-graviton-skill
+https://github.com/aws-samples/sample-go-x86-to-graviton-skill
 ```
 
 Kiro reads `POWER.md`.
@@ -77,7 +77,7 @@ Kiro reads `POWER.md`.
 The skill directory is a plain clone of this repository, so updating it is one command and `git log` tells you what version you have:
 
 ```bash
-git clone --depth 1 https://github.com/RadiumGu/go-x86-to-graviton-skill.git \
+git clone --depth 1 https://github.com/aws-samples/sample-go-x86-to-graviton-skill.git \
   ~/.claude/skills/go-x86-to-graviton
 
 # update
@@ -92,7 +92,7 @@ Do not clone into your project: a git repository inside your repository is an em
 
 ```bash
 D=.agents/skills/go-x86-to-graviton     # or .github/skills/..., .windsurf/skills/..., .roo/skills/...
-mkdir -p "$D" && curl -fsSL https://github.com/RadiumGu/go-x86-to-graviton-skill/archive/refs/heads/main.tar.gz \
+mkdir -p "$D" && curl -fsSL https://github.com/aws-samples/sample-go-x86-to-graviton-skill/archive/refs/heads/main.tar.gz \
   | tar -xz --strip-components=1 --exclude='*/tests' --exclude='*/examples' --exclude='*/.github' -C "$D"
 ```
 
@@ -465,7 +465,7 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for how to contribute, and [CODE_OF_CONDU
 
 ## License
 
-[MIT-0](LICENSE). The folder structure and file conventions follow the [AWS Graviton Agent Skills](https://github.com/aws/aws-graviton-getting-started/tree/main/tools/skills) layout; all content here is original.
+[MIT-0](LICENSE). 
 
 ## References
 

@@ -1,8 +1,12 @@
 # go-x86-to-graviton Skill 使用说明
 
+[English](../README.md) | **简体中文（使用手册）**
+
 这是一个 [Agent Skill](https://agentskills.io)，用来驱动 AI 编程 agent 把 Go 应用从 x86 迁移到 AWS Graviton（ARM64/aarch64）：静态分析、只做必要的修改、最后在真实 arm64 硬件上验证。
 
 它按官方 [AWS Graviton Agent Skills](https://aws.github.io/graviton/tools/skills/) 的结构编写——官方目录里有 Java、Python、.NET 三个 skill，**没有 Go**。
+
+> **免责声明：** 本项目是示例代码，仅用于非生产环境的演示和学习，按“现状”提供，不附带任何形式的担保。请在你自己的环境中审查和测试后再使用，不要原样用于生产负载。迁移结果是否适用于你的应用，需要你自行验证。
 
 > 这份文档是完整的操作手册。只想快速上手看[最短路径](#最短路径)；想理解它为什么这么设计，从[为什么 Go 不能照抄 Java 的做法](#为什么-go-不能照抄-java-的做法)开始读。
 
@@ -83,7 +87,7 @@ Java 和 Python 的 Graviton skill，大部分精力花在一个**产物可用�
 ```bash
 # 1. 装 skill（Claude Code 示例；其他平台见下一节）。skill 目录就是一个 git clone，
 #    以后用 git pull 更新
-git clone --depth 1 https://github.com/RadiumGu/go-x86-to-graviton-skill.git \
+git clone --depth 1 https://github.com/aws-samples/sample-go-x86-to-graviton-skill.git \
   ~/.claude/skills/go-x86-to-graviton
 
 # 2. 先用只读脚本扫一眼，判断这次迁移的量级。-tags 填部署时用的 build tags
@@ -110,7 +114,7 @@ skill 放在**仓库根目录**，所以仓库地址本身就是 skill 地址。
 打开 **Agent Steering & Skills** 面板 → **+** → **Import a skill** → **GitHub**，粘贴：
 
 ```
-https://github.com/RadiumGu/go-x86-to-graviton-skill
+https://github.com/aws-samples/sample-go-x86-to-graviton-skill
 ```
 
 Kiro 读的是 `POWER.md`。
@@ -124,7 +128,7 @@ Kiro 读的是 `POWER.md`。
 skill 目录就是这个仓库的一个 clone，更新只要一条命令，`git log` 就能看到装的是哪个版本：
 
 ```bash
-git clone --depth 1 https://github.com/RadiumGu/go-x86-to-graviton-skill.git \
+git clone --depth 1 https://github.com/aws-samples/sample-go-x86-to-graviton-skill.git \
   ~/.claude/skills/go-x86-to-graviton
 
 # 更新
@@ -139,7 +143,7 @@ git -C ~/.claude/skills/go-x86-to-graviton pull --ff-only
 
 ```bash
 D=.agents/skills/go-x86-to-graviton     # 或 .github/skills/...、.windsurf/skills/...、.roo/skills/...
-mkdir -p "$D" && curl -fsSL https://github.com/RadiumGu/go-x86-to-graviton-skill/archive/refs/heads/main.tar.gz \
+mkdir -p "$D" && curl -fsSL https://github.com/aws-samples/sample-go-x86-to-graviton-skill/archive/refs/heads/main.tar.gz \
   | tar -xz --strip-components=1 --exclude='*/tests' --exclude='*/examples' --exclude='*/.github' -C "$D"
 ```
 

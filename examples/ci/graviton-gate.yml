@@ -147,7 +147,7 @@ jobs:
       - name: fetch the scanner
         run: |
           git clone --depth 1 -q \
-            https://github.com/RadiumGu/go-x86-to-graviton-skill.git /tmp/gvskill
+            https://github.com/aws-samples/sample-go-x86-to-graviton-skill.git /tmp/gvskill
           chmod +x /tmp/gvskill/scripts/go_arch_scan.sh
       - name: scan
         run: |
